@@ -6,7 +6,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Literal
 
-from PIL import Image
+from PIL import Image, ImageEnhance
 
 from .palette import Matcher, nearest_palette_index
 from .pattern import GRID_SIZE, Pattern
@@ -15,13 +15,34 @@ FitMode = Literal["crop", "contain", "stretch"]
 ResampleMode = Literal["smooth", "nearest"]
 
 
+@dataclass(frozen=True)
+class CropBox:
+    """原图坐标系中的严格正方形裁切区域。"""
+
+    left: int
+    top: int
+    side: int
+
+    def validate_for(self, image_size: tuple[int, int]) -> None:
+        width, height = image_size
+        if width <= 0 or height <= 0:
+            raise ValueError("图片尺寸无效")
+        if not all(isinstance(value, int) and not isinstance(value, bool) for value in (self.left, self.top, self.side)):
+            raise ValueError("裁切区域必须使用整数原图像素坐标")
+        if self.left < 0 or self.top < 0 or self.side <= 0:
+            raise ValueError("裁切区域必须位于图片内且边长为正数")
+        if self.left + self.side > width or self.top + self.side > height:
+            raise ValueError("裁切区域超出图片范围")
+
+
 @dataclass
 class ImageOptions:
     fit_mode: FitMode = "crop"
     resample: ResampleMode = "smooth"
     matcher: Matcher = "oklab"
-    reduce_colors: bool = True
+    reduce_colors: bool = False
     dither: bool = False
+    crop_box: CropBox | None = None
     crop_offset_x: float = 0.0
     crop_offset_y: float = 0.0
 
@@ -34,6 +55,8 @@ class ImageOptions:
             raise ValueError("不支持的颜色匹配方式")
         if not -1 <= self.crop_offset_x <= 1 or not -1 <= self.crop_offset_y <= 1:
             raise ValueError("构图偏移必须在 -1 到 1 之间")
+        if self.crop_box is not None and not isinstance(self.crop_box, CropBox):
+            raise ValueError("裁切区域数据无效")
         if self.reduce_colors:
             self.dither = False
 
@@ -53,6 +76,10 @@ def prepare_square(image: Image.Image, options: ImageOptions) -> Image.Image:
     width, height = source.size
     if not width or not height:
         raise ValueError("图片尺寸无效")
+    if options.crop_box is not None:
+        options.crop_box.validate_for(source.size)
+        left, top, side = options.crop_box.left, options.crop_box.top, options.crop_box.side
+        return source.crop((left, top, left + side, top + side))
     if options.fit_mode == "stretch":
         return source.resize((min(width, height), min(width, height)), Image.Resampling.BICUBIC)
 
@@ -67,6 +94,12 @@ def prepare_square(image: Image.Image, options: ImageOptions) -> Image.Image:
     return square
 
 
+def enhance_for_pixel_art(image: Image.Image) -> Image.Image:
+    """轻度拉开缩小后相邻像素的明暗与饱和度，保留人物关键特征。"""
+    enhanced = ImageEnhance.Contrast(image).enhance(1.4)
+    return ImageEnhance.Color(enhanced).enhance(1.12)
+
+
 def _resample_filter(mode: ResampleMode) -> Image.Resampling:
     return Image.Resampling.NEAREST if mode == "nearest" else Image.Resampling.LANCZOS
 
@@ -75,7 +108,8 @@ def convert_image(image: Image.Image, options: ImageOptions | None = None) -> Pa
     options = options or ImageOptions()
     prepared = prepare_square(image, options)
     small = prepared.resize((GRID_SIZE, GRID_SIZE), _resample_filter(options.resample))
-    colors = [small.getpixel((column, row)) for row in range(GRID_SIZE) for column in range(GRID_SIZE)]
+    enhanced = enhance_for_pixel_art(small)
+    colors = [enhanced.getpixel((column, row)) for row in range(GRID_SIZE) for column in range(GRID_SIZE)]
     initial = [nearest_palette_index(color, options.matcher) for color in colors]
     candidates: tuple[int, ...] | None = None
     if options.reduce_colors:

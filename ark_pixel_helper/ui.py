@@ -7,17 +7,18 @@ import os
 import queue
 import threading
 import time
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from pathlib import Path
 from tkinter import BooleanVar, IntVar, StringVar, Tk, Toplevel, filedialog, messagebox, ttk
 from tkinter import Canvas
 
-from PIL import Image
+from PIL import Image, ImageTk
 
 from .autofill import AutoFillRunner, PyAutoGuiMouse
 from .calibration import Calibration, CalibrationError, ClientArea, Rect, suggested_layout
 from .export import ExportError, export_pattern_csv, export_pattern_png
-from .image_pipeline import ImageOptions, convert_image
+from .image_pipeline import CropBox, ImageOptions, convert_image
 from .palette import PALETTE, palette_index_to_number
 from .pattern import GRID_SIZE, Pattern
 
@@ -51,6 +52,222 @@ def progress_percent(done: int, total: int) -> int:
     if total <= 0:
         return 0
     return max(0, min(100, round(done * 100 / total)))
+
+
+def rgb_hex(color: tuple[int, int, int]) -> str:
+    return "#%02x%02x%02x" % color
+
+
+@dataclass(frozen=True)
+class CanvasImageMap:
+    """保持原图和等比缩略画布之间坐标转换的单一事实来源。"""
+
+    image_size: tuple[int, int]
+    canvas_size: tuple[int, int]
+
+    @property
+    def scale(self) -> float:
+        image_width, image_height = self.image_size
+        canvas_width, canvas_height = self.canvas_size
+        return min(canvas_width / image_width, canvas_height / image_height)
+
+    @property
+    def origin(self) -> tuple[float, float]:
+        image_width, image_height = self.image_size
+        canvas_width, canvas_height = self.canvas_size
+        return ((canvas_width - image_width * self.scale) / 2, (canvas_height - image_height * self.scale) / 2)
+
+    def canvas_to_source(self, x: float, y: float) -> tuple[int, int]:
+        origin_x, origin_y = self.origin
+        image_width, image_height = self.image_size
+        return (
+            max(0, min(image_width, round((x - origin_x) / self.scale))),
+            max(0, min(image_height, round((y - origin_y) / self.scale))),
+        )
+
+    def crop_to_canvas(self, crop_box: CropBox) -> tuple[float, float, float]:
+        crop_box.validate_for(self.image_size)
+        origin_x, origin_y = self.origin
+        return (origin_x + crop_box.left * self.scale, origin_y + crop_box.top * self.scale, crop_box.side * self.scale)
+
+
+class CropSelection:
+    """维护始终位于原图范围内的头像式正方形选择框。"""
+
+    def __init__(self, image_size: tuple[int, int], crop_box: CropBox | None = None) -> None:
+        self.image_size = image_size
+        width, height = image_size
+        if width <= 0 or height <= 0:
+            raise ValueError("图片尺寸无效")
+        side = min(width, height)
+        self.crop_box = crop_box or CropBox((width - side) // 2, (height - side) // 2, side)
+        self.crop_box.validate_for(image_size)
+
+    def _set_box(self, left: float, top: float, side: float) -> CropBox:
+        width, height = self.image_size
+        bounded_side = max(1, min(round(side), width, height))
+        bounded_left = max(0, min(round(left), width - bounded_side))
+        bounded_top = max(0, min(round(top), height - bounded_side))
+        self.crop_box = CropBox(bounded_left, bounded_top, bounded_side)
+        return self.crop_box
+
+    def move_by(self, delta_x: float, delta_y: float) -> CropBox:
+        box = self.crop_box
+        return self._set_box(box.left + delta_x, box.top + delta_y, box.side)
+
+    def resize_from_corner(self, corner: str, point: tuple[float, float]) -> CropBox:
+        left, top, side = self.crop_box.left, self.crop_box.top, self.crop_box.side
+        right, bottom = left + side, top + side
+        x, y = point
+        if corner == "nw":
+            side = min(right - x, bottom - y)
+            left, top = right - side, bottom - side
+        elif corner == "ne":
+            side = min(x - left, bottom - y)
+            top = bottom - side
+        elif corner == "sw":
+            side = min(right - x, y - top)
+            left = right - side
+        elif corner == "se":
+            side = min(x - left, y - top)
+        else:
+            raise ValueError("不支持的裁切框角点")
+        return self._set_box(left, top, side)
+
+    def zoom_at(self, point: tuple[float, float], factor: float) -> CropBox:
+        if factor <= 0:
+            raise ValueError("缩放比例必须为正数")
+        box = self.crop_box
+        side = box.side / factor
+        x, y = point
+        relative_x = (x - box.left) / box.side
+        relative_y = (y - box.top) / box.side
+        return self._set_box(x - side * relative_x, y - side * relative_y, side)
+
+
+class CropDialog(Toplevel):
+    """在提交前由用户直接确认原图坐标裁切区域的模态对话框。"""
+
+    HANDLE_RADIUS = 8
+
+    def __init__(self, parent: Tk, image: Image.Image, on_confirm: Callable[[CropBox], None], crop_box: CropBox | None = None, options: ImageOptions | None = None) -> None:
+        super().__init__(parent)
+        self.title("确认正方形裁切区域")
+        self.configure(bg=SURFACE)
+        self.transient(parent)
+        self.resizable(False, False)
+        self._on_confirm = on_confirm
+        self._source_image = image.copy()
+        self._selection = CropSelection(image.size, crop_box)
+        self._preview_options = options or ImageOptions()
+        self.preview_pattern = convert_image(self._source_image, replace(self._preview_options, crop_box=self._selection.crop_box))
+        self._drag_mode: str | None = None
+        self._last_source_point: tuple[int, int] | None = None
+
+        # 左侧原图与右侧 24×24 终局预览必须同时完整可见，横图也不能挤掉右侧预览。
+        max_width, max_height = 340, 500
+        scale = min(max_width / image.width, max_height / image.height, 1.0)
+        self._canvas_size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+        self._map = CanvasImageMap(image.size, self._canvas_size)
+        preview = image.convert("RGB").resize(self._canvas_size, Image.Resampling.LANCZOS)
+        self._preview_image = ImageTk.PhotoImage(preview)
+
+        ttk.Label(self, text="框住脸部、双眼和发型等重点区域", style="TLabel", padding=(16, 16, 16, 4)).pack(anchor="w")
+        ttk.Label(self, text="拖动框内可移动；拖动四角调整大小；滚轮可围绕指针缩放。确认前不会修改当前图案。", style="Muted.TLabel", padding=(16, 0, 16, 12), wraplength=max_width).pack(anchor="w")
+        workspace = ttk.Frame(self, style="TFrame", padding=(16, 0))
+        workspace.pack(fill="both", expand=True)
+        self.canvas = Canvas(workspace, width=self._canvas_size[0], height=self._canvas_size[1], highlightthickness=1, highlightbackground=BORDER, cursor="crosshair")
+        self.canvas.grid(row=0, column=0, sticky="n")
+        self.canvas.create_image(0, 0, image=self._preview_image, anchor="nw", tags="image")
+        preview_panel = ttk.Frame(workspace, style="TFrame", padding=(14, 0, 0, 0))
+        preview_panel.grid(row=0, column=1, sticky="n")
+        ttk.Label(preview_panel, text="最终拼豆预览", style="Section.TLabel").pack(anchor="w")
+        ttk.Label(preview_panel, text="24 × 24 / 游戏 40 色", style="Muted.TLabel").pack(anchor="w", pady=(4, 8))
+        self.preview_cell_size = 12
+        preview_size = GRID_SIZE * self.preview_cell_size
+        self.preview_canvas = Canvas(preview_panel, width=preview_size, height=preview_size, bg=CANVAS_BG, highlightthickness=1, highlightbackground=BORDER)
+        self.preview_canvas.pack(anchor="w")
+        self.canvas.bind("<ButtonPress-1>", self._start_drag)
+        self.canvas.bind("<B1-Motion>", self._drag)
+        self.canvas.bind("<ButtonRelease-1>", self._finish_drag)
+        self.canvas.bind("<MouseWheel>", self._zoom)
+        self.canvas.bind("<Button-4>", lambda event: self._zoom_by(event, 1.15))
+        self.canvas.bind("<Button-5>", lambda event: self._zoom_by(event, 1 / 1.15))
+
+        actions = ttk.Frame(self, style="TFrame", padding=16)
+        actions.pack(fill="x")
+        ttk.Button(actions, text="取消", command=self.destroy).pack(side="right")
+        ttk.Button(actions, text="使用此区域", command=self._confirm, style="Primary.TButton").pack(side="right", padx=(0, 8))
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.bind("<Escape>", lambda _event: self.destroy())
+        self._redraw()
+        self.grab_set()
+        self.focus_set()
+
+    def _canvas_point_to_source(self, x: float, y: float) -> tuple[int, int]:
+        return self._map.canvas_to_source(x, y)
+
+    def _corners(self) -> dict[str, tuple[float, float]]:
+        left, top, side = self._map.crop_to_canvas(self._selection.crop_box)
+        return {"nw": (left, top), "ne": (left + side, top), "sw": (left, top + side), "se": (left + side, top + side)}
+
+    def _start_drag(self, event: object) -> None:
+        x, y = event.x, event.y  # type: ignore[attr-defined]
+        for corner, (corner_x, corner_y) in self._corners().items():
+            if (x - corner_x) ** 2 + (y - corner_y) ** 2 <= self.HANDLE_RADIUS ** 2:
+                self._drag_mode = corner
+                self._last_source_point = None
+                return
+        left, top, side = self._map.crop_to_canvas(self._selection.crop_box)
+        if left <= x <= left + side and top <= y <= top + side:
+            self._drag_mode = "move"
+            self._last_source_point = self._canvas_point_to_source(x, y)
+
+    def _drag(self, event: object) -> None:
+        if self._drag_mode is None:
+            return
+        point = self._canvas_point_to_source(event.x, event.y)  # type: ignore[attr-defined]
+        if self._drag_mode == "move" and self._last_source_point is not None:
+            previous_x, previous_y = self._last_source_point
+            self._selection.move_by(point[0] - previous_x, point[1] - previous_y)
+            self._last_source_point = point
+        elif self._drag_mode != "move":
+            self._selection.resize_from_corner(self._drag_mode, point)
+        self._redraw()
+
+    def _finish_drag(self, _event: object) -> None:
+        self._drag_mode = None
+        self._last_source_point = None
+
+    def _zoom(self, event: object) -> None:
+        self._zoom_by(event, 1.15 if event.delta > 0 else 1 / 1.15)  # type: ignore[attr-defined]
+
+    def _zoom_by(self, event: object, factor: float) -> None:
+        self._selection.zoom_at(self._canvas_point_to_source(event.x, event.y), factor)  # type: ignore[attr-defined]
+        self._redraw()
+
+    def _redraw(self) -> None:
+        self.preview_pattern = convert_image(self._source_image, replace(self._preview_options, crop_box=self._selection.crop_box))
+        self.preview_canvas.delete("preview-cell")
+        for row, values in enumerate(self.preview_pattern.cells):
+            for column, color_index in enumerate(values):
+                x0 = column * self.preview_cell_size
+                y0 = row * self.preview_cell_size
+                self.preview_canvas.create_rectangle(x0, y0, x0 + self.preview_cell_size, y0 + self.preview_cell_size, fill=rgb_hex(PALETTE[color_index]), outline=GRID_LINE, tags="preview-cell")
+        self.canvas.delete("crop-overlay")
+        left, top, side = self._map.crop_to_canvas(self._selection.crop_box)
+        width, height = self._canvas_size
+        for coords in ((0, 0, width, top), (0, top, left, top + side), (left + side, top, width, top + side), (0, top + side, width, height)):
+            self.canvas.create_rectangle(*coords, fill="#102b28", stipple="gray50", outline="", tags="crop-overlay")
+        self.canvas.create_rectangle(left, top, left + side, top + side, outline=ACCENT, width=3, tags="crop-overlay")
+        for x, y in self._corners().values():
+            self.canvas.create_rectangle(x - self.HANDLE_RADIUS, y - self.HANDLE_RADIUS, x + self.HANDLE_RADIUS, y + self.HANDLE_RADIUS, fill="#ffffff", outline=ACCENT, width=2, tags="crop-overlay")
+
+    def _confirm(self) -> None:
+        crop_box = self._selection.crop_box
+        crop_box.validate_for(self._selection.image_size)
+        self._on_confirm(crop_box)
+        self.destroy()
 
 
 @dataclass
@@ -159,6 +376,7 @@ class PixelHelperApp:
         self.settings = AppSettings.load()
         self.source_image: Image.Image | None = None
         self.source_path: Path | None = None
+        self.crop_box: CropBox | None = None
         self.pattern = Pattern.blank()
         self.selected_cell = (0, 0)
         self.calibration: Calibration | None = self._load_calibration()
@@ -168,7 +386,8 @@ class PixelHelperApp:
 
         self.fit_mode = StringVar(value="裁剪（可调构图）")
         self.resample = StringVar(value="平滑取样（照片 / 插画）")
-        self.reduce_colors = BooleanVar(value=True)
+        self.detail_strategy = StringVar(value="更多颜色细节（完整 40 色候选）")
+        self.reduce_colors = BooleanVar(value=False)
         self.dither = BooleanVar(value=False)
         self.show_numbers = BooleanVar(value=False)
         self.crop_x = IntVar(value=0)
@@ -297,8 +516,10 @@ class PixelHelperApp:
     def _build_controls(self, parent: ttk.Frame) -> None:
         ttk.Label(parent, text="01 / 导入与构图", style="Section.TLabel").pack(anchor="w", pady=(0, 8))
         ttk.Button(parent, text="导入 PNG / JPG 图片", command=self.import_image).pack(fill="x", ipady=6)
-        ttk.Label(parent, text="图片只在本机处理，不会上传。", style="Muted.TLabel", wraplength=230).pack(anchor="w", pady=(6, 8))
-        ttk.Label(parent, text="正方形构图", style="TLabel").pack(anchor="w")
+        self.recrop_button = ttk.Button(parent, text="重新裁切图片", command=self.recrop_image, state="disabled")
+        self.recrop_button.pack(fill="x", ipady=5, pady=(6, 0))
+        ttk.Label(parent, text="选择图片后先框选脸部、双眼和发型；图片只在本机处理，不会上传。", style="Muted.TLabel", wraplength=230).pack(anchor="w", pady=(6, 8))
+        ttk.Label(parent, text="正方形构图（框选区域优先；下方为旧图快捷设置）", style="TLabel", wraplength=230).pack(anchor="w")
         fit = ttk.Combobox(parent, textvariable=self.fit_mode, state="readonly", values=("裁剪（可调构图）", "完整包含（白底留白）", "拉伸"))
         fit.pack(fill="x", pady=(3, 8), ipady=4)
         fit.bind("<<ComboboxSelected>>", self._apply_if_image)
@@ -314,8 +535,11 @@ class PixelHelperApp:
         sampling = ttk.Combobox(parent, textvariable=self.resample, state="readonly", values=("平滑取样（照片 / 插画）", "最近邻（已有像素画）"))
         sampling.pack(fill="x", pady=(3, 8), ipady=4)
         sampling.bind("<<ComboboxSelected>>", self._apply_if_image)
-        ttk.Checkbutton(parent, text="减少杂色（保留最多 16 个主色）", variable=self.reduce_colors, command=self._apply_if_image).pack(anchor="w", pady=(2, 4))
-        ttk.Checkbutton(parent, text="可选抖动（关闭减少杂色后生效）", variable=self.dither, command=self._apply_if_image).pack(anchor="w", pady=(0, 10))
+        ttk.Label(parent, text="细节策略", style="TLabel").pack(anchor="w")
+        strategy = ttk.Combobox(parent, textvariable=self.detail_strategy, state="readonly", values=("更多颜色细节（完整 40 色候选）", "清晰轮廓（最多 16 主色）"))
+        strategy.pack(fill="x", pady=(3, 4), ipady=4)
+        strategy.bind("<<ComboboxSelected>>", self._apply_detail_strategy)
+        ttk.Checkbutton(parent, text="可选抖动（仅更多颜色细节时生效）", variable=self.dither, command=self._apply_if_image).pack(anchor="w", pady=(0, 10))
         ttk.Button(parent, text="应用转换到 24×24 图案", command=self.apply_conversion, style="Primary.TButton").pack(fill="x", ipady=7)
         ttk.Label(parent, text="顺序：导图 → 调整效果 → 检查图纸 → 打开游戏 → 自动填色", style="Muted.TLabel", wraplength=230).pack(anchor="w", pady=(10, 0))
 
@@ -359,12 +583,17 @@ class PixelHelperApp:
         except CalibrationError:
             return None
 
+    def _apply_detail_strategy(self, *_args: object) -> None:
+        self.reduce_colors.set(self.detail_strategy.get().startswith("清晰轮廓"))
+        self._apply_if_image()
+
     def _image_options(self) -> ImageOptions:
         return ImageOptions(
             fit_mode={"裁剪（可调构图）": "crop", "完整包含（白底留白）": "contain", "拉伸": "stretch"}[self.fit_mode.get()],
             resample="nearest" if self.resample.get().startswith("最近邻") else "smooth",
-            reduce_colors=self.reduce_colors.get(),
+            reduce_colors=self.detail_strategy.get().startswith("清晰轮廓"),
             dither=self.dither.get(),
+            crop_box=self.crop_box,
             crop_offset_x=self.crop_x.get() / 100,
             crop_offset_y=self.crop_y.get() / 100,
         )
@@ -376,14 +605,41 @@ class PixelHelperApp:
             return
         try:
             with Image.open(filename) as image:
-                self.source_image = image.copy()
-            self.source_path = Path(filename)
-            self.settings.last_image_directory = self.source_path.parent
-            self.settings.save()
-            self.image_name.set(self.source_path.name)
-            self.apply_conversion()
+                candidate_image = image.copy()
+            candidate_path = Path(filename)
         except (OSError, ValueError) as exc:
             self.status.set(f"导入失败：无法读取该图片。请确认它是未损坏的 PNG 或 JPG/JPEG。({exc})")
+            return
+
+        def commit(crop_box: CropBox) -> None:
+            crop_box.validate_for(candidate_image.size)
+            self.source_image = candidate_image
+            self.source_path = candidate_path
+            self.crop_box = crop_box
+            self.settings.last_image_directory = candidate_path.parent
+            self.settings.save()
+            self.image_name.set(candidate_path.name)
+            self.recrop_button.configure(state="normal")
+            self.apply_conversion()
+
+        try:
+            CropDialog(self.root, candidate_image, commit, None, self._image_options())
+        except (OSError, ValueError) as exc:
+            self.status.set(f"无法打开裁切确认页：请重新选择图片或稍后重试。({exc})")
+
+    def recrop_image(self) -> None:
+        if self.source_image is None:
+            self.status.set("请先导入图片，再调整裁切区域。")
+            return
+
+        def commit(crop_box: CropBox) -> None:
+            self.crop_box = crop_box
+            self.apply_conversion()
+
+        try:
+            CropDialog(self.root, self.source_image, commit, self.crop_box, self._image_options())
+        except (OSError, ValueError) as exc:
+            self.status.set(f"无法打开裁切确认页：请稍后重试。({exc})")
 
     def _apply_if_image(self, *_args: object) -> None:
         if self.source_image is not None:

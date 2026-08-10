@@ -9,3 +9,4 @@ __pycache__/
 # Local AI assistant configuration
 CLAUDE.md
 GEMINI.md
+.omc/

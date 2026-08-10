@@ -1,6 +1,7 @@
+import pytest
 from PIL import Image
 
-from ark_pixel_helper.image_pipeline import ImageOptions, compose_image, convert_image, prepare_square
+from ark_pixel_helper.image_pipeline import CropBox, ImageOptions, compose_image, convert_image, enhance_for_pixel_art, prepare_square
 from ark_pixel_helper.palette import WHITE_INDEX
 
 
@@ -68,5 +69,58 @@ def test_optional_dithering_distributes_a_flat_intermediate_color_between_palett
     assert len({color for row in pattern.cells for color in row}) > 1
 
 
+def test_dithering_uses_the_same_enhanced_pixels_as_the_non_dither_path(monkeypatch):
+    image = Image.new("RGB", (24, 24), (100, 100, 100))
+    image.putpixel((1, 0), (156, 156, 156))
+    received: list[tuple[int, int, int]] = []
+
+    def capture_dither(colors, _matcher, _candidates):
+        received.extend(colors)
+        return [0] * (24 * 24)
+
+    monkeypatch.setattr("ark_pixel_helper.image_pipeline._dither", capture_dither)
+    convert_image(image, ImageOptions(reduce_colors=False, dither=True))
+
+    assert received[0] != (100, 100, 100) or received[1] != (156, 156, 156)
+
+
 def test_compose_image_returns_white_backed_rgb():
     assert compose_image(Image.new("RGBA", (1, 1), (0, 0, 0, 0))).getpixel((0, 0)) == (255, 255, 255)
+
+
+def test_crop_box_requires_a_positive_square_entirely_inside_the_source_image():
+    CropBox(100, 50, 400).validate_for((600, 500))
+
+    for crop_box in (CropBox(-1, 0, 1), CropBox(0, -1, 1), CropBox(0, 0, 0), CropBox(300, 100, 301), CropBox(0.5, 0, 1), CropBox(0, 0, 1.5)):
+        with pytest.raises(ValueError):
+            crop_box.validate_for((600, 500))
+
+
+def test_crop_box_is_the_exact_source_for_prepare_square_and_conversion():
+    image = Image.new("RGB", (600, 500), (255, 255, 255))
+    image.putpixel((100, 50), (211, 47, 54))
+    image.putpixel((499, 449), (34, 34, 34))
+    options = ImageOptions(crop_box=CropBox(100, 50, 400), resample="nearest", matcher="rgb")
+
+    prepared = prepare_square(image, options)
+    pattern = convert_image(image, options)
+
+    assert prepared.size == (400, 400)
+    assert prepared.getpixel((0, 0)) == (211, 47, 54)
+    assert prepared.getpixel((399, 399)) == (34, 34, 34)
+    assert len(pattern.cells) == 24
+    assert all(len(row) == 24 for row in pattern.cells)
+    assert all(0 <= color < 40 for row in pattern.cells for color in row)
+
+
+def test_image_options_preserve_more_color_detail_by_default():
+    assert ImageOptions().reduce_colors is False
+
+
+def test_enhancement_increases_local_luminance_separation_before_quantization():
+    image = Image.new("RGB", (3, 1))
+    image.putdata([(100, 100, 100), (128, 128, 128), (156, 156, 156)])
+
+    enhanced = enhance_for_pixel_art(image)
+
+    assert enhanced.getpixel((2, 0))[0] - enhanced.getpixel((0, 0))[0] > 56
