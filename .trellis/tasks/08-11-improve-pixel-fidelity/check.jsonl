@@ -1,0 +1,4 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/tasks/08-11-improve-pixel-fidelity/prd.md", "reason": "按实际复现素材验收相似度修复"}
+{"file": ".trellis/tasks/08-11-improve-pixel-fidelity/design.md", "reason": "检查CropBox/UI/图像管线数据流"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "图像与桌面UI质量检查"}
