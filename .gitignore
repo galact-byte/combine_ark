@@ -1,0 +1,11 @@
+# Python-generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local Pi configuration
+.pi/
+
+# Local AI assistant configuration
+CLAUDE.md
+GEMINI.md
