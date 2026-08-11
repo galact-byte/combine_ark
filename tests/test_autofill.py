@@ -88,3 +88,33 @@ def test_runner_uses_current_client_area_instead_of_assuming_reference_resolutio
 def test_runner_requires_valid_calibration():
     with pytest.raises(ValueError):
         AutoFillRunner(FakeMouse()).run(Pattern.blank(), None, Event())
+
+
+def test_runner_splits_scroll_into_single_ticks_with_reanchor():
+    pattern = Pattern.blank()
+    pattern.set_cell(0, 0, 0)
+    pattern.set_cell(1, 0, 24)
+    mouse = FakeMouse()
+
+    AutoFillRunner(mouse).run(pattern, get_calibration(), Event())
+
+    # 一次大滚动拆成 scroll_clicks 次单刻度，每次重锚到滚轮锤点。
+    scrolls = [action for action in mouse.actions if action[0] == "scroll"]
+    assert scrolls == [("scroll", -1, 780)] * 4
+
+
+def test_runner_honors_should_abort_predicate():
+    pattern = Pattern.blank()
+    pattern.set_cell(0, 0, 0)
+    pattern.set_cell(0, 1, 0)
+    calls = {"n": 0}
+
+    def should_abort() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 2
+
+    mouse = FakeMouse()
+    completed = AutoFillRunner(mouse).run(pattern, get_calibration(), Event(), should_abort=should_abort)
+
+    assert completed is False
+    assert len(mouse.actions) <= 2

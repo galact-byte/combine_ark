@@ -1,5 +1,38 @@
 # 修改记录 — combine_ark
 
+## 2026-08-11 — 自动填色改用网格识别与 SendInput 注入
+
+### 背景与目标
+- 修复“自动填色跑完但游戏画布全空”：用户实测完全无反应。两个病因——① `pyautogui`（`mouse_event`）被 Unity Raw Input 吞且非管理员注入被 UIPI 拒；② 校准靠手填 19 个比例矩形，非 1280×720 下整体偏出格子。
+- 方案取自参考项目（arknights-pixel-autofill、Arknights-Painter）的取舍：网格识别、SendInput 双路注入、启动提权、居中视口模型、单刻度滚动、F8 急停。
+
+### 影响与兼容性
+- `Pattern`、图像管线、图纸导出、`Calibration.load/save` 格式保持不变；旧校准文件仍可读。
+- 自动填色现需管理员权限：`python main.py` 启动时非管理员会弹 UAC 重启（只尝试一次）。非 Windows 自动跳过提权与注入。
+- 校准弹窗由“手填 19 框”改为“捕获→截图识别→预览确认”；失焦急停由“鼠标移左上角”改为 F8。
+
+### 文件与实现
+| 操作 | 路径 | 说明 |
+|---|---|---|
+| 新增 | `ark_pixel_helper/grid_detect.py` | 纯 PIL 投影式网格线识别，反推画布外框与每格中心，置信度不足返回 None。 |
+| 新增 | `ark_pixel_helper/win_input.py` | ctypes SendInput 双路驱动、坐标归一化、管理员检测/提权、F8 轮询、客户区截图；`windll` 均 Windows 守卫。 |
+| 修改 | `ark_pixel_helper/calibration.py` | 新增 `viewport_seed` 居中视口模型与 `detect_grid_rect`；`suggested_layout` 改为复用视口种子。 |
+| 修改 | `ark_pixel_helper/autofill.py` | `run` 新增 `should_abort` 统一急停；滚动拆单刻度重锚；MouseDriver 支持相对位移。 |
+| 修改 | `ark_pixel_helper/ui.py` | 校准弹窗改截图识别预览确认；worker 改用 SendInput 驱动 + F8/失焦统一急停。 |
+| 修改 | `main.py` | 启动时管理员检测与 runas 提权（防 UAC 拒绝死循环）。 |
+| 新增 | `tests/test_grid_detect.py`、`tests/test_win_input.py` | 网格识别反推/ROI/回退；坐标归一化/相对位移/提权决策。 |
+| 修改 | `tests/test_autofill.py`、`tests/test_calibration.py`、`tests/test_ui_settings.py` | 单刻度滚动、should_abort、视口种子、校准弹窗无输入框烟雾。 |
+| 修改 | `.trellis/spec/backend/quality-guidelines.md` | 固化注入双路/网格识别/提权/单刻度滚动/F8 契约与检查项。 |
+
+### 验证
+- `python -m pytest -q`：61 项通过（新增网格识别、win_input 纯函数、单刻度滚动/should_abort、视口种子、校准弹窗烟雾）。
+- `python -m compileall -q ark_pixel_helper main.py`：通过。
+- Windows 上实例化验证：INPUT 结构体 40 字节、SendInputMouse 初始化、虚拟桌面读取、`is_admin=False` 均正常；**未**在真实游戏中发送点击。
+
+### 已知限制与后续
+- 真实注入效果（SendInput 是否被游戏接受）需用户以**管理员**启动后在真实拼豆编辑器中实测；CI 不覆盖真实点击与提权。
+- 色板色块仍用视口种子建议值 + 可视确认，未做全自动色彩识别；极端主题下网格识别可能回退种子几何。
+
 ## 2026-08-11 — 手动头像式裁切与像素细节保留
 
 ### 背景与目标

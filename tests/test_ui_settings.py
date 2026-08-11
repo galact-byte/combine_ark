@@ -1,9 +1,34 @@
 from pathlib import Path
+from tkinter import Canvas, Toplevel
+
 from PIL import Image
 
 import ark_pixel_helper.ui as ui
 from ark_pixel_helper.image_pipeline import CropBox
 from ark_pixel_helper.ui import AppSettings, PixelHelperApp, initial_image_directory
+
+
+def _descendants(widget):
+    for child in widget.winfo_children():
+        yield child
+        yield from _descendants(child)
+
+
+def test_open_calibration_uses_capture_preview_instead_of_manual_coordinate_entry(root):
+    app = PixelHelperApp(root)
+
+    app.open_calibration()
+
+    dialogs = [w for w in app.root.winfo_children() if isinstance(w, Toplevel)]
+    assert dialogs, "应创建校准弹窗"
+    dialog = dialogs[-1]
+    assert dialog.title() == "捕获游戏窗口并识别画布"
+    descendants = list(_descendants(dialog))
+    # 不再有手填坐标输入框，改为截图预览确认。
+    assert [w for w in descendants if w.winfo_class() == "TEntry"] == []
+    assert any(isinstance(w, Canvas) for w in descendants), "应包含截图预览画布"
+    dialog.grab_release()
+    dialog.destroy()
 
 
 def test_settings_remember_last_successful_image_directory_without_hard_coded_user_paths(tmp_path):

@@ -115,18 +115,61 @@ class Calibration:
             raise CalibrationError("校准文件无效，请重新完成手动校准。") from exc
 
 
-def suggested_layout(client: ClientArea) -> "Calibration":
-    """以 1280×720 参考编辑器几何按当前客户区比例生成建议校准，供用户微调。"""
+_BASE_W, _BASE_H = 1280, 720
+
+
+def viewport_seed(client: ClientArea) -> "Calibration":
+    """BASE 1280×720 居中视口模型：在客户区内取最大居中 16:9 视口再映射参考几何。
+
+    比裸比例缩放更稳：多屏/信箱黑边下不会整体飘移，作为网格识别的初始估计。"""
+    if client.width * _BASE_H >= client.height * _BASE_W:
+        vp_h = client.height
+        vp_w = round(vp_h * _BASE_W / _BASE_H)
+    else:
+        vp_w = client.width
+        vp_h = round(vp_w * _BASE_H / _BASE_W)
+    off_x = (client.width - vp_w) // 2
+    off_y = (client.height - vp_h) // 2
+
     def sx(value: float) -> int:
-        return round(value / 1280 * client.width)
+        return round(value / _BASE_W * vp_w) + off_x
 
     def sy(value: float) -> int:
-        return round(value / 720 * client.height)
+        return round(value / _BASE_H * vp_h) + off_y
 
-    grid = Rect(sx(295), sy(119), sx(561), sy(561))
-    palette = Rect(sx(954), sy(250), sx(281), sy(420))
-    lower_palette = Rect(sx(954), sy(264), sx(281), sy(420))
+    def w(value: float) -> int:
+        return round(value / _BASE_W * vp_w)
+
+    def h(value: float) -> int:
+        return round(value / _BASE_H * vp_h)
+
+    grid = Rect(sx(295), sy(119), w(561), h(561))
+    palette = Rect(sx(954), sy(250), w(281), h(420))
+    lower_palette = Rect(sx(954), sy(264), w(281), h(420))
     return Calibration(client, grid, palette, (sx(1100), sy(600)), lower_palette=lower_palette, scroll_clicks=4)
+
+
+def suggested_layout(client: ClientArea) -> "Calibration":
+    """建议校准：基于居中视口种子，供用户接受或微调。"""
+    return viewport_seed(client)
+
+
+def detect_grid_rect(client: ClientArea, image, margin_ratio: float = 0.08) -> tuple[Rect, bool]:
+    """用客户区截图识别画布网格，返回 (客户区相对 grid Rect, 是否命中识别)。
+
+    截图以客户区左上为原点，故图像坐标即客户区相对坐标。以视口种子画布为 ROI；
+    置信度不足时回退种子几何，不静默用错坐标。"""
+    from .grid_detect import detect_grid
+
+    seed_grid = viewport_seed(client).grid
+    mx = round(seed_grid.width * margin_ratio)
+    my = round(seed_grid.height * margin_ratio)
+    roi = (seed_grid.x - mx, seed_grid.y - my, seed_grid.x + seed_grid.width + mx, seed_grid.y + seed_grid.height + my)
+    result = detect_grid(image, roi=roi)
+    if result is None:
+        return seed_grid, False
+    left, top, right, bottom = result.cells_bbox
+    return Rect(left, top, max(24, right - left), max(24, bottom - top)), True
 
 
 @dataclass(frozen=True)

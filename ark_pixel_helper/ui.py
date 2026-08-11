@@ -15,8 +15,9 @@ from tkinter import Canvas
 
 from PIL import Image, ImageTk
 
-from .autofill import AutoFillRunner, PyAutoGuiMouse
-from .calibration import Calibration, CalibrationError, ClientArea, Rect, suggested_layout
+from .autofill import AutoFillRunner
+from .calibration import Calibration, CalibrationError, ClientArea, Rect, detect_grid_rect, viewport_seed
+from .win_input import SendInputMouse, capture_client, f8_pressed
 from .export import ExportError, export_pattern_csv, export_pattern_png
 from .image_pipeline import CropBox, ImageOptions, convert_image
 from .palette import PALETTE, palette_index_to_number
@@ -571,7 +572,7 @@ class PixelHelperApp:
         self._section(parent, "05 / 游戏自动填色")
         self.calibration_info = StringVar()
         ttk.Label(parent, textvariable=self.calibration_info, style="Muted.TLabel", wraplength=260).pack(anchor="w", pady=(0, 8))
-        ttk.Button(parent, text="手动校准游戏画布与色板", command=self.open_calibration).pack(fill="x", ipady=5)
+        ttk.Button(parent, text="捕获游戏窗口并识别画布", command=self.open_calibration).pack(fill="x", ipady=5)
         self.start_button = ttk.Button(parent, text="开始自动填色（需确认）", command=self.start_autofill, style="Warning.TButton")
         self.start_button.pack(fill="x", ipady=6, pady=(8, 0))
         self.cancel_button = ttk.Button(parent, text="停止后续点击", command=self.cancel_autofill, state="disabled")
@@ -730,34 +731,44 @@ class PixelHelperApp:
 
     def open_calibration(self) -> None:
         dialog = Toplevel(self.root)
-        dialog.title("手动校准游戏画布与色板")
+        dialog.title("捕获游戏窗口并识别画布")
         dialog.configure(bg=SURFACE)
         dialog.transient(self.root)
         dialog.grab_set()
-        fields = (("客户区左上 X", ""), ("客户区左上 Y", ""), ("客户区宽", ""), ("客户区高", ""), ("画布左上 X（相对客户区）", ""), ("画布左上 Y（相对客户区）", ""), ("画布宽", ""), ("画布高", ""), ("顶部色板左上 X（相对客户区）", ""), ("顶部色板左上 Y（相对客户区）", ""), ("顶部色板宽", ""), ("顶部色板可视高（6行）", ""), ("滚轮锚点 X（相对客户区）", ""), ("滚轮锚点 Y（相对客户区）", ""), ("底部色板左上 X（滚到底后）", ""), ("底部色板左上 Y（滚到底后）", ""), ("底部色板宽", ""), ("底部色板可视高（6行）", ""), ("滚到底所需滚轮档数", ""))
-        defaults = self.calibration
-        lower = defaults.lower_palette if defaults else None
-        existing = [str(value) for value in (
-            defaults.reference_client.left, defaults.reference_client.top, defaults.reference_client.width, defaults.reference_client.height,
-            defaults.grid.x, defaults.grid.y, defaults.grid.width, defaults.grid.height,
-            defaults.palette.x, defaults.palette.y, defaults.palette.width, defaults.palette.height,
-            *defaults.scroll_anchor,
-            lower.x if lower else "", lower.y if lower else "", lower.width if lower else "", lower.height if lower else "",
-            defaults.scroll_clicks,
-        )] if defaults else [item[1] for item in fields]
-        entries: list[ttk.Entry] = []
-        captured_target: list[tuple[int, int] | None] = [None]
-        capture_status = StringVar(value="未捕获游戏窗口：保存后无法启动自动绘制。")
-        ttk.Label(dialog, text="校准使用当前游戏客户区的相对位置，任何窗口尺寸 / DPI 下均按比例换算。\n先点击捕获按钮，3 秒内切到已打开的游戏编辑器；再填写画布、顶部色板、底部色板和滚轮数据。", style="TLabel", wraplength=500, padding=16).grid(row=0, column=0, columnspan=2, sticky="w")
-        for row, ((label, _), value) in enumerate(zip(fields, existing), 1):
-            ttk.Label(dialog, text=label, style="TLabel", padding=(16, 3)).grid(row=row, column=0, sticky="w")
-            entry = ttk.Entry(dialog, width=16)
-            entry.insert(0, value)
-            entry.grid(row=row, column=1, padx=(8, 16), pady=3, sticky="ew")
-            entries.append(entry)
 
-        def capture_game_window() -> None:
-            capture_status.set("请在 3 秒内切到游戏拼豆编辑器…")
+        preview_w = 480
+        candidate: list[Calibration | None] = [None]
+        status = StringVar(value="点击下方按钮后，3 秒内切到已打开的拼豆编辑器并保持前台。")
+
+        ttk.Label(
+            dialog,
+            text="自动校准：捕获游戏窗口 → 截图识别 24×24 画布网格 → 预览确认。\n无需再手填坐标；识别失败会回退到居中视口估计并提示重试。",
+            style="TLabel", wraplength=preview_w, padding=16,
+        ).pack(anchor="w")
+
+        preview = Canvas(dialog, width=preview_w, height=round(preview_w * 9 / 16), bg=CANVAS_BG, highlightthickness=1, highlightbackground=BORDER)
+        preview.pack(padx=16, pady=(0, 8))
+        ttk.Label(dialog, textvariable=status, style="Muted.TLabel", wraplength=preview_w, padding=(16, 4)).pack(anchor="w")
+
+        def render(image: Image.Image, cal: Calibration, used: bool) -> None:
+            scale = preview_w / image.width
+            disp_h = round(image.height * scale)
+            preview.configure(height=disp_h)
+            photo = ImageTk.PhotoImage(image.resize((preview_w, disp_h)))
+            preview._photo = photo  # 防止被垃圾回收
+            preview.delete("all")
+            preview.create_image(0, 0, anchor="nw", image=photo)
+
+            def box(rect: Rect, color: str, dash: tuple[int, int] | None = None) -> None:
+                preview.create_rectangle(rect.x * scale, rect.y * scale, (rect.x + rect.width) * scale, (rect.y + rect.height) * scale, outline=color, width=2, dash=dash)
+
+            box(cal.grid, ACCENT if used else WARNING)
+            box(cal.palette, HEADER_BOTTOM)
+            if cal.lower_palette is not None:
+                box(cal.lower_palette, HEADER_BOTTOM, dash=(4, 3))
+
+        def capture() -> None:
+            status.set("请在 3 秒内切到游戏拼豆编辑器…")
             capture_button.configure(state="disabled")
 
             def read_target() -> None:
@@ -765,55 +776,44 @@ class PixelHelperApp:
                     handle = foreground_window_handle()
                     process_id = window_process_id(handle)
                     client = get_foreground_client_area(handle)
-                    captured_target[0] = (handle, process_id)
-                    guess = suggested_layout(client)
-                    suggested_values = (
-                        client.left, client.top, client.width, client.height,
-                        guess.grid.x, guess.grid.y, guess.grid.width, guess.grid.height,
-                        guess.palette.x, guess.palette.y, guess.palette.width, guess.palette.height,
-                        guess.scroll_anchor[0], guess.scroll_anchor[1],
-                        guess.lower_palette.x, guess.lower_palette.y, guess.lower_palette.width, guess.lower_palette.height,
-                        guess.scroll_clicks,
-                    )
-                    for index, value in enumerate(suggested_values):
-                        entries[index].delete(0, "end")
-                        entries[index].insert(0, str(value))
-                    capture_status.set(f"已捕获游戏窗口（进程 {process_id}）并自动填入建议值；请对照游戏微调画布和色板区域后保存。")
-                except CalibrationError as exc:
-                    capture_status.set(f"捕获失败：{exc}")
+                    shot = capture_client(handle)
+                    grid_rect, used = detect_grid_rect(client, shot)
+                    cal = replace(viewport_seed(client), grid=grid_rect, target_window=handle, target_process_id=process_id)
+                    candidate[0] = cal
+                    render(shot, cal, used)
+                    if used:
+                        status.set(f"已识别画布网格（进程 {process_id}）。绿框=识别画布，蓝框=色板；核对无误后点“确认使用”。")
+                    else:
+                        status.set(f"未能可靠识别网格（进程 {process_id}），已回退居中视口估计（橙框）。可点“重新识别”重试，或直接“确认使用”。")
+                    confirm_button.configure(state="normal")
+                    capture_button.configure(text="重新识别")
+                except (CalibrationError, RuntimeError, OSError) as exc:
+                    status.set(f"捕获失败：{exc}")
                 finally:
                     capture_button.configure(state="normal")
 
             dialog.after(3000, read_target)
 
-        capture_button = ttk.Button(dialog, text="3 秒后捕获当前游戏窗口", command=capture_game_window)
-        capture_button.grid(row=len(fields) + 1, column=0, columnspan=2, sticky="ew", padx=16, pady=(12, 4), ipady=5)
-        ttk.Label(dialog, textvariable=capture_status, style="Muted.TLabel", wraplength=500, padding=(16, 4)).grid(row=len(fields) + 2, column=0, columnspan=2, sticky="w")
-
-        def save() -> None:
+        def confirm() -> None:
+            cal = candidate[0]
+            if cal is None:
+                status.set("请先捕获并识别游戏窗口。")
+                return
             try:
-                if captured_target[0] is None:
-                    raise CalibrationError("请先使用“3 秒后捕获当前游戏窗口”，并在倒计时结束时保持游戏编辑器为前台")
-                values = [int(entry.get()) for entry in entries]
-                target_window, target_process_id = captured_target[0]
-                self.calibration = Calibration(
-                    ClientArea(*values[:4]),
-                    Rect(*values[4:8]),
-                    Rect(*values[8:12]),
-                    tuple(values[12:14]),
-                    lower_palette=Rect(*values[14:18]),
-                    scroll_clicks=values[18],
-                    target_window=target_window,
-                    target_process_id=target_process_id,
-                )
-                self.calibration.save(calibration_path())
+                cal.save(calibration_path())
+                self.calibration = cal
                 dialog.destroy()
-                self.status.set("校准已保存到本机应用数据目录。开始自动填色前仍会读取当前前台游戏客户区。")
+                self.status.set("校准已保存。开始自动填色前仍会重新读取当前前台游戏客户区并按比例换算。")
                 self._refresh_pattern()
-            except (ValueError, CalibrationError) as exc:
-                messagebox.showerror("校准数据无效", f"请检查全部数值；宽高必须为正数。\n{exc}", parent=dialog)
+            except CalibrationError as exc:
+                status.set(f"保存失败：{exc}")
 
-        ttk.Button(dialog, text="保存校准", command=save, style="Primary.TButton").grid(row=len(fields) + 3, column=0, columnspan=2, sticky="ew", padx=16, pady=16, ipady=5)
+        button_row = ttk.Frame(dialog, style="Panel.TFrame")
+        button_row.pack(fill="x", padx=16, pady=16)
+        capture_button = ttk.Button(button_row, text="3 秒后捕获并识别画布", command=capture)
+        capture_button.pack(side="left", expand=True, fill="x", ipady=5, padx=(0, 6))
+        confirm_button = ttk.Button(button_row, text="确认使用", command=confirm, style="Primary.TButton", state="disabled")
+        confirm_button.pack(side="left", expand=True, fill="x", ipady=5)
 
     def start_autofill(self) -> None:
         if self.calibration is None or self.calibration.target_window is None or self.calibration.target_process_id is None:
@@ -822,7 +822,7 @@ class PixelHelperApp:
         if self.pattern.non_white_count == 0:
             self.status.set("当前图案全为白色；默认跳过白格，因此无需自动点击。")
             return
-        message = "将向当前前台游戏窗口发送鼠标点击，默认跳过白色格。\n\n确认后有 3 秒切换到已打开的拼豆编辑器；倒计时结束时必须让游戏保持前台。\n鼠标移到屏幕左上角或点击“停止后续点击”可安全中止。"
+        message = "将以管理员权限、通过 SendInput 向当前前台游戏窗口发送鼠标点击，默认跳过白色格。\n\n确认后有 3 秒切换到已打开的拼豆编辑器；倒计时结束时必须让游戏保持前台。\n按 F8 或点击“停止后续点击”可安全中止；游戏失去前台也会自动停止。"
         if not messagebox.askokcancel("确认开始自动填色", message, icon="warning", parent=self.root):
             return
         self.cancel_event.clear()
@@ -848,14 +848,22 @@ class PixelHelperApp:
                 self._finish_autofill("自动填色未开始：当前前台窗口不是校准时确认的游戏窗口，因此未发送任何点击。")
                 return
             client_area = get_foreground_client_area(target_window)
-            runner = AutoFillRunner(PyAutoGuiMouse())
+            runner = AutoFillRunner(SendInputMouse(target_window))
+
+            def should_abort() -> bool:
+                if f8_pressed():
+                    self.cancel_event.set()
+                if self.cancel_event.is_set():
+                    return True
+                return self.calibration is None or not is_calibrated_window_foreground(self.calibration)
+
             completed = runner.run(
                 self.pattern,
                 self.calibration,
                 self.cancel_event,
                 self._on_progress,
                 client_area,
-                lambda: self.calibration is not None and is_calibrated_window_foreground(self.calibration),
+                should_abort=should_abort,
             )
             self._finish_autofill("自动填色完成。" if completed else "自动填色已停止：游戏窗口失去前台或用户已取消；已完成部分保留在游戏画布，可按图纸继续。")
         except Exception as exc:  # pyautogui 的安全停止异常也必须恢复界面。

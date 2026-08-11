@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from ark_pixel_helper.calibration import Calibration, CalibrationError, ClientArea, Rect, suggested_layout
+from ark_pixel_helper.calibration import Calibration, CalibrationError, ClientArea, Rect, suggested_layout, viewport_seed
 
 
 def calibration() -> Calibration:
@@ -26,6 +26,18 @@ def test_suggested_layout_is_valid_and_adapts_to_any_client_size():
         assert suggested.lower_palette.y >= suggested.palette.y
         # 比例自适应：不同客户区宽度得到不同网格宽度。
     assert suggested_layout(ClientArea(0, 0, 1600, 900)).grid.width != suggested_layout(ClientArea(0, 0, 1280, 720)).grid.width
+
+
+def test_viewport_seed_centers_16_9_viewport_for_letterboxed_clients():
+    # 过宽客户区：视口按高居中，左右黑边 → 画布 x 比裸比例推算更靠右。
+    wide = viewport_seed(ClientArea(0, 0, 1000, 500))
+    assert isinstance(wide, Calibration)
+    assert wide.grid.x > round(295 / 1280 * 1000)
+    # 过高客户区：视口按宽居中，上下黑边 → 画布 y 更靠下。
+    tall = viewport_seed(ClientArea(0, 0, 1280, 1000))
+    assert tall.grid.y > round(119 / 720 * 1000)
+    # 恰好 16:9：无黑边，构造合法。
+    assert isinstance(viewport_seed(ClientArea(0, 0, 1280, 720)), Calibration)
 
 
 def test_calibration_scales_grid_and_palette_coordinates_for_current_client_size():

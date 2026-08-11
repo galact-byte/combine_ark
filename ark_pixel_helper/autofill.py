@@ -55,6 +55,7 @@ class AutoFillRunner:
         on_progress: Callable[[tuple[int, int]], None] | None = None,
         client_area: ClientArea | None = None,
         target_is_active: Callable[[], bool] | None = None,
+        should_abort: Callable[[], bool] | None = None,
     ) -> bool:
         if calibration is None:
             raise ValueError("尚未完成校准。请先打开游戏拼豆编辑器并完成手动校准。")
@@ -63,15 +64,25 @@ class AutoFillRunner:
         if any(cell >= 24 for row in pattern.cells for cell in row) and calibration.lower_palette is None:
             raise ValueError("图案使用了后 16 色，但底部色板尚未校准。请先滚动色板到底部并完成校准。")
         scaled = calibration.for_client(client_area or calibration.reference_client)
+
+        def aborted() -> bool:
+            if should_abort is not None:
+                return should_abort()
+            return cancel_event.is_set() or (target_is_active is not None and not target_is_active())
+
         total = pattern.non_white_count
         completed = 0
         lower_palette_visible = False
         for step in build_fill_steps(pattern):
-            if cancel_event.is_set() or (target_is_active is not None and not target_is_active()):
+            if aborted():
                 return False
             if step.kind == "scroll":
                 x, y = scaled.scroll_point()
-                self.mouse.scroll(-scaled.source.scroll_clicks, x, y)
+                # 拆成多次单刻度滚动，每次重锚，避免 Unity 把一次大滚动只算一格。
+                for _ in range(scaled.source.scroll_clicks):
+                    if aborted():
+                        return False
+                    self.mouse.scroll(-1, x, y)
                 lower_palette_visible = True
             elif step.kind == "select":
                 x, y = scaled.palette_center(step.color_index, "bottom" if lower_palette_visible else "top")
