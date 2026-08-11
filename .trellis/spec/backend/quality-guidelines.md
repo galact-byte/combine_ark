@@ -119,6 +119,18 @@ CropDialog(self.root, candidate_image, commit, None)
 
 ---
 
+## Automation Injection & Grid Detection
+
+- Mouse injection uses Win32 `SendInput` (dual path: relative move to feed Unity Raw Input, then absolute virtual-desktop coordinate to align the system cursor). `pyautogui`/`mouse_event` is a swallowed-input fallback, never the default — a foreground game switched to Raw Input ignores `mouse_event`.
+- Autofill requires administrator rights: without elevation UIPI blocks input to an elevated game. Elevate at startup via `should_elevate(is_admin(), already_tried)`; the `already_tried` marker (`--elevated` argv) MUST guard against a UAC-decline relaunch loop.
+- Canvas geometry comes from screenshot grid-line detection (`detect_grid` / `detect_grid_rect`), not hand-typed rectangles. `viewport_seed` (centered 1280×720 model) is only the ROI seed; when detection confidence is below threshold, fall back to the seed geometry and tell the user — never silently use wrong coordinates.
+- Palette scroll to colors 25–40 is emitted as N single-tick `scroll(-1, …)` calls with re-anchor each tick, not one large scroll, so Unity does not collapse it into a single step.
+- Emergency stop is F8 (`f8_pressed`), which replaces the pointer-to-top-left failsafe (relative-move injection would false-trigger the corner). Foreground/PID re-validation and the cancel button remain.
+- All `windll` access stays inside functions guarded by `os.name == 'nt'`; module top level (pure functions, ctypes struct defs) must import cleanly on any platform so image/pattern features and unit tests run cross-platform. No new third-party dependency (pywin32 etc.) — ctypes + Pillow only.
+- Testability seam: `to_absolute`, `relative_delta`, `should_elevate`, `detect_grid`, `detect_grid_rect`, `viewport_seed` are pure and unit-tested; real `SendInput`/elevation/capture are never exercised in CI.
+
+---
+
 ## Code Review Checklist
 
 - [ ] No hard-coded user path or single-resolution runtime dependency.
@@ -126,3 +138,6 @@ CropDialog(self.root, candidate_image, commit, None)
 - [ ] Cancel and foreground/PID validation occur before every click step.
 - [ ] UI worker has no direct tkinter calls.
 - [ ] Pattern is the single source for preview, exports, and automatic drawing.
+- [ ] Mouse injection uses SendInput dual path; grid geometry comes from detection with seed fallback + user notice.
+- [ ] Startup elevation guards against a UAC-decline relaunch loop; `windll` calls are Windows-guarded.
+- [ ] Palette scroll is single-tick with re-anchor; F8 emergency stop is wired.
