@@ -17,6 +17,17 @@ def test_canvas_image_map_round_trips_crop_box_in_original_image_coordinates():
     assert image_map.canvas_to_source(375, 250) == (750, 500)
 
 
+def test_canvas_to_source_f_is_smooth_and_move_to_anchors_the_box():
+    image_map = CanvasImageMap((2000, 1000), (500, 250))  # scale 0.25
+    # 浮点映射：画布内半像素也能区分，不四舍五入、不限幅。
+    fx, fy = image_map.canvas_to_source_f(10.5, 20.25)
+    assert abs(fx - 42.0) < 1e-6 and abs(fy - 81.0) < 1e-6
+    # move_to 直接定位左上角，供锤点拖拽保持框跟光标。
+    selection = CropSelection((2000, 1000), CropBox(0, 0, 800))
+    selection.move_to(120.4, 60.9)
+    assert selection.crop_box == CropBox(120, 61, 800)
+
+
 def test_crop_selection_clamps_drag_resize_and_zoom_to_image_bounds():
     selection = CropSelection((1000, 500), CropBox(250, 0, 500))
 

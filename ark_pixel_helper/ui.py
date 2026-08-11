@@ -16,7 +16,7 @@ from tkinter import Canvas
 from PIL import Image, ImageTk
 
 from .autofill import AutoFillRunner, build_residual_pattern
-from .calibration import Calibration, CalibrationError, ClientArea, Rect, calibration_from_capture
+from .calibration import Calibration, CalibrationError, ClientArea, Rect, calibration_from_capture, viewport_seed
 from .win_input import SendInputMouse, capture_client, f8_pressed
 from .palette_locate import swatch_centers
 from .export import ExportError, export_pattern_csv, export_pattern_png
@@ -87,6 +87,11 @@ class CanvasImageMap:
             max(0, min(image_height, round((y - origin_y) / self.scale))),
         )
 
+    def canvas_to_source_f(self, x: float, y: float) -> tuple[float, float]:
+        """不四舍五入、不限幅的浮点映射，供拖拽平滑跟随。"""
+        origin_x, origin_y = self.origin
+        return ((x - origin_x) / self.scale, (y - origin_y) / self.scale)
+
     def crop_to_canvas(self, crop_box: CropBox) -> tuple[float, float, float]:
         crop_box.validate_for(self.image_size)
         origin_x, origin_y = self.origin
@@ -116,6 +121,9 @@ class CropSelection:
     def move_by(self, delta_x: float, delta_y: float) -> CropBox:
         box = self.crop_box
         return self._set_box(box.left + delta_x, box.top + delta_y, box.side)
+
+    def move_to(self, left: float, top: float) -> CropBox:
+        return self._set_box(left, top, self.crop_box.side)
 
     def resize_from_corner(self, corner: str, point: tuple[float, float]) -> CropBox:
         left, top, side = self.crop_box.left, self.crop_box.top, self.crop_box.side
@@ -165,6 +173,7 @@ class CropDialog(Toplevel):
         self.preview_pattern = convert_image(self._source_image, replace(self._preview_options, crop_box=self._selection.crop_box))
         self._drag_mode: str | None = None
         self._last_source_point: tuple[int, int] | None = None
+        self._grab_offset: tuple[float, float] | None = None
 
         # 左侧原图与右侧 24×24 终局预览必须同时完整可见，横图也不能挤掉右侧预览。
         max_width, max_height = 340, 500
@@ -219,27 +228,30 @@ class CropDialog(Toplevel):
             if (x - corner_x) ** 2 + (y - corner_y) ** 2 <= self.HANDLE_RADIUS ** 2:
                 self._drag_mode = corner
                 self._last_source_point = None
+                self._grab_offset = None
                 return
         left, top, side = self._map.crop_to_canvas(self._selection.crop_box)
         if left <= x <= left + side and top <= y <= top + side:
             self._drag_mode = "move"
-            self._last_source_point = self._canvas_point_to_source(x, y)
+            # 记下“鼠标相对框左上角”的偏移（浮点源坐标），拖拽时保持框跟光标，不漂不跳。
+            src_x, src_y = self._map.canvas_to_source_f(x, y)
+            self._grab_offset = (src_x - self._selection.crop_box.left, src_y - self._selection.crop_box.top)
 
     def _drag(self, event: object) -> None:
         if self._drag_mode is None:
             return
-        point = self._canvas_point_to_source(event.x, event.y)  # type: ignore[attr-defined]
-        if self._drag_mode == "move" and self._last_source_point is not None:
-            previous_x, previous_y = self._last_source_point
-            self._selection.move_by(point[0] - previous_x, point[1] - previous_y)
-            self._last_source_point = point
+        if self._drag_mode == "move" and self._grab_offset is not None:
+            src_x, src_y = self._map.canvas_to_source_f(event.x, event.y)  # type: ignore[attr-defined]
+            self._selection.move_to(src_x - self._grab_offset[0], src_y - self._grab_offset[1])
         elif self._drag_mode != "move":
+            point = self._canvas_point_to_source(event.x, event.y)  # type: ignore[attr-defined]
             self._selection.resize_from_corner(self._drag_mode, point)
         self._redraw()
 
     def _finish_drag(self, _event: object) -> None:
         self._drag_mode = None
         self._last_source_point = None
+        self._grab_offset = None
 
     def _zoom(self, event: object) -> None:
         self._zoom_by(event, 1.15 if event.delta > 0 else 1 / 1.15)  # type: ignore[attr-defined]
@@ -782,6 +794,17 @@ class PixelHelperApp:
                     handle = foreground_window_handle()
                     process_id = window_process_id(handle)
                     client = get_foreground_client_area(handle)
+                    # 先把颜料滚回第一页：色板识别按第一页布局拟合，在第二页捕获会让色板框整个偏上错位。
+                    try:
+                        seed_palette = viewport_seed(client).palette
+                        ax = client.left + seed_palette.x + seed_palette.width // 2
+                        ay = client.top + seed_palette.y + seed_palette.height // 2
+                        pre_scroll = SendInputMouse(handle)
+                        for _ in range(12):
+                            pre_scroll.scroll(1, ax, ay)
+                        time.sleep(0.35)
+                    except (RuntimeError, OSError):
+                        pass
                     shot = capture_client(handle)
                     cal, grid_used, palette_used = calibration_from_capture(client, shot, handle, process_id)
                     candidate[0] = cal
