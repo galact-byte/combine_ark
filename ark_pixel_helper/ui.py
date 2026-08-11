@@ -16,7 +16,7 @@ from tkinter import Canvas
 from PIL import Image, ImageTk
 
 from .autofill import AutoFillRunner
-from .calibration import Calibration, CalibrationError, ClientArea, Rect, detect_grid_rect, viewport_seed
+from .calibration import Calibration, CalibrationError, ClientArea, Rect, calibration_from_capture
 from .win_input import SendInputMouse, capture_client, f8_pressed
 from .export import ExportError, export_pattern_csv, export_pattern_png
 from .image_pipeline import CropBox, ImageOptions, convert_image
@@ -750,7 +750,7 @@ class PixelHelperApp:
         preview.pack(padx=16, pady=(0, 8))
         ttk.Label(dialog, textvariable=status, style="Muted.TLabel", wraplength=preview_w, padding=(16, 4)).pack(anchor="w")
 
-        def render(image: Image.Image, cal: Calibration, used: bool) -> None:
+        def render(image: Image.Image, cal: Calibration, grid_used: bool, palette_used: bool) -> None:
             scale = preview_w / image.width
             disp_h = round(image.height * scale)
             preview.configure(height=disp_h)
@@ -762,10 +762,8 @@ class PixelHelperApp:
             def box(rect: Rect, color: str, dash: tuple[int, int] | None = None) -> None:
                 preview.create_rectangle(rect.x * scale, rect.y * scale, (rect.x + rect.width) * scale, (rect.y + rect.height) * scale, outline=color, width=2, dash=dash)
 
-            box(cal.grid, ACCENT if used else WARNING)
-            box(cal.palette, HEADER_BOTTOM)
-            if cal.lower_palette is not None:
-                box(cal.lower_palette, HEADER_BOTTOM, dash=(4, 3))
+            box(cal.grid, ACCENT if grid_used else WARNING)
+            box(cal.palette, HEADER_BOTTOM if palette_used else WARNING)
 
         def capture() -> None:
             status.set("请在 3 秒内切到游戏拼豆编辑器…")
@@ -777,14 +775,12 @@ class PixelHelperApp:
                     process_id = window_process_id(handle)
                     client = get_foreground_client_area(handle)
                     shot = capture_client(handle)
-                    grid_rect, used = detect_grid_rect(client, shot)
-                    cal = replace(viewport_seed(client), grid=grid_rect, target_window=handle, target_process_id=process_id)
+                    cal, grid_used, palette_used = calibration_from_capture(client, shot, handle, process_id)
                     candidate[0] = cal
-                    render(shot, cal, used)
-                    if used:
-                        status.set(f"已识别画布网格（进程 {process_id}）。绿框=识别画布，蓝框=色板；核对无误后点“确认使用”。")
-                    else:
-                        status.set(f"未能可靠识别网格（进程 {process_id}），已回退居中视口估计（橙框）。可点“重新识别”重试，或直接“确认使用”。")
+                    render(shot, cal, grid_used, palette_used)
+                    grid_note = "画布绿框✔" if grid_used else "画布橙框（回退估计）"
+                    palette_note = "色板蓝框✔" if palette_used else "色板橙框（回退估计）"
+                    status.set(f"识别完成（进程 {process_id}）：{grid_note}，{palette_note}。核对无误点“确认使用”；有橙框可“重新识别”重试。")
                     confirm_button.configure(state="normal")
                     capture_button.configure(text="重新识别")
                 except (CalibrationError, RuntimeError, OSError) as exc:

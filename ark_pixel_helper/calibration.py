@@ -172,6 +172,40 @@ def detect_grid_rect(client: ClientArea, image, margin_ratio: float = 0.08) -> t
     return Rect(left, top, max(24, right - left), max(24, bottom - top)), True
 
 
+def _clamp_rect(rect: Rect, client: ClientArea) -> Rect:
+    x = min(max(0, rect.x), client.width - 4)
+    y = min(max(0, rect.y), client.height - 6)
+    width = min(rect.width, client.width - x)
+    height = min(rect.height, client.height - y)
+    return Rect(x, y, width, height)
+
+
+def calibration_from_capture(client: ClientArea, image, target_window: int | None = None, target_process_id: int | None = None) -> tuple["Calibration", bool, bool]:
+    """从客户区截图构造校准：识别画布网格 + 识别顶部色板矩形。
+
+    返回 (Calibration, grid_detected, palette_detected)。识别失败各自回退视口种子。
+    底部色板与顶部同屏位置（滚动原地换内容），滚轮给足量以确保滚到底（色号 17–40 可见）。"""
+    from .palette_locate import detect_palette_rect
+
+    seed = viewport_seed(client)
+    grid_rect, grid_used = detect_grid_rect(client, image)
+    detected_palette = detect_palette_rect(image, grid_rect)
+    palette_used = detected_palette is not None
+    palette_rect = _clamp_rect(detected_palette if detected_palette is not None else seed.palette, client)
+    scroll_anchor = (palette_rect.x + palette_rect.width // 2, palette_rect.y + palette_rect.height // 2)
+    cal = Calibration(
+        client,
+        grid_rect,
+        palette_rect,
+        scroll_anchor,
+        lower_palette=palette_rect,
+        scroll_clicks=8,
+        target_window=target_window,
+        target_process_id=target_process_id,
+    )
+    return cal, grid_used, palette_used
+
+
 @dataclass(frozen=True)
 class ScaledCalibration:
     source: Calibration
