@@ -2,7 +2,7 @@ from threading import Event
 
 import pytest
 
-from ark_pixel_helper.autofill import AutoFillRunner, FillStep, build_fill_steps
+from ark_pixel_helper.autofill import AutoFillRunner, FillStep, build_fill_steps, build_residual_pattern
 from ark_pixel_helper.calibration import Calibration, ClientArea, Rect
 from ark_pixel_helper.pattern import Pattern
 
@@ -83,6 +83,25 @@ def test_runner_uses_current_client_area_instead_of_assuming_reference_resolutio
     AutoFillRunner(mouse).run(pattern, get_calibration(), Event(), client_area=ClientArea(10, 20, 2000, 1000))
 
     assert mouse.actions == [("click", 1450, 220), ("click", 230, 135)]
+
+
+def test_build_residual_pattern_keeps_only_mismatched_non_white_cells():
+    pattern = Pattern.blank()
+    pattern.set_cell(0, 0, 5)   # 应为色号6，截图也是5 → 已正确，不重填
+    pattern.set_cell(0, 1, 5)   # 应为5，截图是白(3) → 漏格，重填
+    pattern.set_cell(1, 0, 28)  # 应为28，截图是错色26 → 错色，重填
+    pattern.set_cell(2, 2, 3)   # 白格，永不重填
+    rendered = [[3] * 24 for _ in range(24)]
+    rendered[0][0] = 5
+    rendered[0][1] = 3
+    rendered[1][0] = 26
+
+    residual = build_residual_pattern(pattern, rendered)
+
+    assert residual.get_cell(0, 0) == 3  # 已正确 → 残留中为白
+    assert residual.get_cell(0, 1) == 5  # 漏格 → 保留
+    assert residual.get_cell(1, 0) == 28  # 错色 → 保留
+    assert residual.non_white_count == 2
 
 
 def test_runner_requires_valid_calibration():
