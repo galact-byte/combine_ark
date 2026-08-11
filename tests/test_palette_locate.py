@@ -71,6 +71,29 @@ def test_swatch_centers_locates_dark_color_despite_dark_panel_background():
     assert len(centers) == 24
 
 
+def test_detect_palette_rect_recovers_geometry_when_captured_on_second_page():
+    # 底页显示色号 17–40（索引 16–39）；面板屏幕位置固定，应得到与顶页一致的矩形。
+    palette_rect = Rect(1150, 330, 320, 456)
+    image = Image.new("RGB", (1550, 860), (232, 232, 232))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((CANVAS.x, CANVAS.y, CANVAS.x + CANVAS.width, CANVAS.y + CANVAS.height), fill=(255, 255, 255))
+    draw.rectangle((palette_rect.x - 40, palette_rect.y - 60, palette_rect.x + palette_rect.width + 40, palette_rect.y + palette_rect.height + 40), fill=(58, 58, 60))
+    for page_pos in range(24):  # 页内位置 0–23 → 索引 16–39
+        index = 16 + page_pos
+        col, row = page_pos % 4, page_pos // 4
+        cx = palette_rect.x + palette_rect.width * (col + 0.5) / 4
+        cy = palette_rect.y + palette_rect.height * (row + 0.5) / 6
+        draw.rectangle((cx - 22, cy - 20, cx + 22, cy + 20), fill=PALETTE[index])
+
+    result = detect_palette_rect(image, CANVAS)
+
+    assert result is not None
+    assert abs(result.x - palette_rect.x) <= 6
+    assert abs(result.y - palette_rect.y) <= 8
+    assert abs(result.width - palette_rect.width) <= 10
+    assert abs(result.height - palette_rect.height) <= 12
+
+
 def test_detect_palette_rect_returns_none_without_swatches():
     blank = Image.new("RGB", (1550, 860), (232, 232, 232))
     assert detect_palette_rect(blank, CANVAS) is None

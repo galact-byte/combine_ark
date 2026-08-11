@@ -101,16 +101,30 @@ def _median(values: list[float]) -> float:
     return ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
 
 
+# 近白/灰/米易与 UI 底混淆的色号，不用于拟合。
+_AMBIGUOUS = {1, 2, 3, 10, 11, 12}
+
+
 def detect_palette_rect(image: Image.Image, canvas_grid_rect: Rect, tol: int = 35, min_pixels: int = 80) -> Rect | None:
-    """识别顶部色板矩形（4 列 × 6 行，色号 1–24）；失败返回 None 由调用方回退。"""
+    """识别色板面板矩形（4 列 × 6 行）。面板屏幕位置固定、只是滚动换内容，
+    故**不论当前在第几页都应得到同一矩形**：先判页（顶页色号1–24/底页 17–40），
+    再按页内行 row=(idx-page_top)//4 拟合。失败返回 None 由调用方回退。"""
     margin = round(canvas_grid_rect.width * 0.05)
     roi = (canvas_grid_rect.x + canvas_grid_rect.width + margin, 0, image.width, image.height)
     centers = _swatch_centers(image, roi, tol, min_pixels)
-    usable = {index: center for index, center in centers.items() if 4 <= index < 24}
-    if len(usable) < 8 or len({i % 4 for i in usable}) < 4 or len({i // 4 for i in usable}) < 3:
+    if len(centers) < 8:
         return None
-    col_points = [(col, _median([c[0] for i, c in usable.items() if i % 4 == col])) for col in range(4) if any(i % 4 == col for i in usable)]
-    row_points = [(row, _median([c[1] for i, c in usable.items() if i // 4 == row])) for row in range(_TOP_PAGE_ROWS) if any(i // 4 == row for i in usable)]
+    # 判当前页：色号 idx 0–15 只在第一页，24–39 只在第二页。
+    top_only = sum(1 for i in centers if i < 16)
+    bottom_only = sum(1 for i in centers if i >= 24)
+    page_top = 0 if top_only >= bottom_only else 16
+    usable = {i: c for i, c in centers.items() if page_top <= i < page_top + 24 and i not in _AMBIGUOUS}
+    cols_present = {i % 4 for i in usable}
+    rows_present = {(i - page_top) // 4 for i in usable}
+    if len(usable) < 8 or len(cols_present) < 4 or len(rows_present) < 3:
+        return None
+    col_points = [(col, _median([c[0] for i, c in usable.items() if i % 4 == col])) for col in sorted(cols_present)]
+    row_points = [(row, _median([c[1] for i, c in usable.items() if (i - page_top) // 4 == row])) for row in sorted(rows_present)]
     col_fit = _linfit(col_points)
     row_fit = _linfit(row_points)
     if col_fit is None or row_fit is None:

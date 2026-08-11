@@ -246,9 +246,12 @@ class CropDialog(Toplevel):
         elif self._drag_mode != "move":
             point = self._canvas_point_to_source(event.x, event.y)  # type: ignore[attr-defined]
             self._selection.resize_from_corner(self._drag_mode, point)
-        self._redraw()
+        # 拖拽中只重画轻量级选框叠加层；24×24 量化预览很贵，放到松手时再算一次。
+        self._redraw_overlay()
 
     def _finish_drag(self, _event: object) -> None:
+        if self._drag_mode is not None:
+            self._redraw()  # 松手时重算一次实时预览
         self._drag_mode = None
         self._last_source_point = None
         self._grab_offset = None
@@ -268,6 +271,9 @@ class CropDialog(Toplevel):
                 x0 = column * self.preview_cell_size
                 y0 = row * self.preview_cell_size
                 self.preview_canvas.create_rectangle(x0, y0, x0 + self.preview_cell_size, y0 + self.preview_cell_size, fill=rgb_hex(PALETTE[color_index]), outline=GRID_LINE, tags="preview-cell")
+        self._redraw_overlay()
+
+    def _redraw_overlay(self) -> None:
         self.canvas.delete("crop-overlay")
         left, top, side = self._map.crop_to_canvas(self._selection.crop_box)
         width, height = self._canvas_size
@@ -794,17 +800,6 @@ class PixelHelperApp:
                     handle = foreground_window_handle()
                     process_id = window_process_id(handle)
                     client = get_foreground_client_area(handle)
-                    # 先把颜料滚回第一页：色板识别按第一页布局拟合，在第二页捕获会让色板框整个偏上错位。
-                    try:
-                        seed_palette = viewport_seed(client).palette
-                        ax = client.left + seed_palette.x + seed_palette.width // 2
-                        ay = client.top + seed_palette.y + seed_palette.height // 2
-                        pre_scroll = SendInputMouse(handle)
-                        for _ in range(12):
-                            pre_scroll.scroll(1, ax, ay)
-                        time.sleep(0.35)
-                    except (RuntimeError, OSError):
-                        pass
                     shot = capture_client(handle)
                     cal, grid_used, palette_used = calibration_from_capture(client, shot, handle, process_id)
                     candidate[0] = cal
@@ -891,34 +886,47 @@ class PixelHelperApp:
             margin = max(8, round(palette.width * 0.06))
             palette_roi = (palette.x - margin, palette.y - margin, palette.x + palette.width + margin, palette.y + palette.height + margin)
             centers_cache: list[dict[int, tuple[float, float]] | None] = [None]
+            page_state = ["top"]  # 确定性翻页：顶页色号 1–24 / 底页 17–40
 
             def refresh_centers() -> None:
                 centers_cache[0] = swatch_centers(capture_client(target_window), palette_roi)
 
+            def scroll_palette(direction: int) -> None:
+                # direction=-1 下翻（露出底页 17–40），+1 上翻（回顶页）；过量滚动 saturate 到末页。
+                anchor_x, anchor_y = scaled.scroll_point()
+                for _ in range(12):
+                    driver.scroll(direction, anchor_x, anchor_y)
+                time.sleep(0.35)  # 等滚动动画停稳再截图，避免抓到过渡态
+                centers_cache[0] = None
+
+            def ensure_page(color_index: int) -> None:
+                if color_index >= 24:
+                    need = "bottom"
+                elif color_index < 16:
+                    need = "top"
+                else:
+                    need = page_state[0]  # 17–24 两页都有，不必翻页
+                if need != page_state[0]:
+                    scroll_palette(-1 if need == "bottom" else 1)
+                    page_state[0] = need
+
             def select_color(color_index: int) -> bool:
-                for _ in range(4):
-                    if should_abort():
-                        return False
-                    if centers_cache[0] is None:
-                        refresh_centers()
-                    position = centers_cache[0].get(color_index) if centers_cache[0] else None
-                    if position is not None:
-                        driver.click(client_area.left + round(position[0]), client_area.top + round(position[1]))
-                        return True
-                    anchor_x, anchor_y = scaled.scroll_point()
-                    for _ in range(3):
-                        driver.scroll(-1, anchor_x, anchor_y)
-                    time.sleep(0.35)  # 等色板滚动动画停稳再截图，避免抓到过渡态导致选色错位
+                # 确定性两遍式：先确保在目标页（只在 top→bottom 翻一次），再在稳定页面上认色块。
+                if should_abort():
+                    return False
+                ensure_page(color_index)
+                if centers_cache[0] is None:
                     refresh_centers()
+                position = centers_cache[0].get(color_index) if centers_cache[0] else None
+                if position is not None:
+                    driver.click(client_area.left + round(position[0]), client_area.top + round(position[1]))
+                    return True
                 return False
 
             def reset_palette_to_top() -> None:
-                # 先把色板滚回顶页，保证从色号 0 开始能找到（否则用户遗留在底页会漏前排色）。
-                anchor_x, anchor_y = scaled.scroll_point()
-                for _ in range(10):
-                    driver.scroll(1, anchor_x, anchor_y)
-                time.sleep(0.35)  # 等滚动动画停稳
-                centers_cache[0] = None
+                # 把色板滚回顶页并置页状态，保证从色号 0 开始能找到。
+                scroll_palette(1)
+                page_state[0] = "top"
 
             def sample_rendered() -> list[list[int]]:
                 shot = capture_client(target_window)
