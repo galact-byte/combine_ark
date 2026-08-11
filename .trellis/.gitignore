@@ -24,6 +24,9 @@
 # Update backup directories
 .backup-*
 
+# Template drift-detection hashes (tool runtime, regenerated locally)
+.template-hashes.json
+
 # Conflict resolution temp files
 *.new
 

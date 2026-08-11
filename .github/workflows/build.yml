@@ -1,0 +1,56 @@
+name: Build Windows EXE
+
+# 推送形如 v1.0.0 的 tag 时触发：打包单文件 exe 并发布到 GitHub Release。
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: 打包 exe
+        run: pyinstaller --onefile --noconsole --name ArkPixelHelper main.py
+
+      - name: 发布到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ArkPixelHelper.exe
+          body: |
+            ## 奇象巡展 · 像素拼豆助手 ${{ github.ref_name }}
+
+            把任意图片一键转成明日方舟「奇象巡展」拼豆编辑器能用的 24×24、40 色图案，并能对着 PC 客户端自动逐格填色。全程本地运行，图片不上传。
+
+            ### 下载即用
+
+            下方 **Assets** 里的 `ArkPixelHelper.exe`，下载双击即可，无需安装 Python。自动填色需要管理员权限，首次会弹 UAC，点是即可。
+
+            ### 上手三步
+
+            1. 导入 PNG / JPG，框选主体后裁成方图
+            2. 选取样方式与细节策略，转换成 24×24 图案，可点格手动改色
+            3. 导出图纸手工拼，或校准游戏窗口后让工具自动填色
+
+            ### 提示
+
+            - 游戏调色板固定 40 色，缺少中暗青灰等过渡色，大面积低饱和暗部只能就近取色，属正常物理上限
+            - 自动填色前请先完成一次窗口校准，并确认游戏在前台
+
+            遇到问题欢迎提 [Issue](https://github.com/galact-byte/combine_ark/issues)。
