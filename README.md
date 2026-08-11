@@ -2,7 +2,15 @@
 
 这是一个仅在本地运行的 Windows 小工具：导入 PNG 或 JPG/JPEG 后，将图片转换为明日方舟「奇象巡展」拼豆编辑器可用的 **24×24、固定 40 色**图案。你可以导出图纸手工填写，也可以在确认与校准后让工具向 **PC 客户端前台窗口**逐格点击填色。
 
-## 安装与启动
+仓库地址：<https://github.com/galact-byte/combine_ark>
+
+## 下载与安装
+
+### 方式一：直接下载 exe（推荐普通用户）
+
+前往 [Releases](https://github.com/galact-byte/combine_ark/releases) 下载最新的 `ArkPixelHelper.exe`，双击即可运行，无需安装 Python。自动填色需要管理员权限，首次运行会弹 UAC。
+
+### 方式二：从源码运行（开发者）
 
 需要 Python 3.11 或更新版本。
 
@@ -12,6 +20,15 @@ python main.py
 ```
 
 运行后会直接打开图形窗口；本程序没有命令行参数。
+
+## 打包发布
+
+推送形如 `v1.0.0` 的 tag 后，GitHub Actions 会在 Windows runner 上用 PyInstaller 打包单文件 exe 并自动发布到 Release（见 `.github/workflows/build.yml`）。本地也可手动打包：
+
+```bash
+python -m pip install pyinstaller
+pyinstaller --onefile --noconsole --name ArkPixelHelper main.py
+```
 
 > 如果只使用导图、手工修正和图纸导出，Pillow 即可工作。自动填色的窗口截图、网格识别、SendInput 注入与提权均基于 Python 自带的 `ctypes` + Pillow，无需额外依赖。
 

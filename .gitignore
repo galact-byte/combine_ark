@@ -10,3 +10,9 @@ __pycache__/
 CLAUDE.md
 GEMINI.md
 .omc/
+.claude/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
