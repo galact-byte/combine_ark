@@ -18,6 +18,7 @@ from PIL import Image, ImageTk
 from .autofill import AutoFillRunner
 from .calibration import Calibration, CalibrationError, ClientArea, Rect, calibration_from_capture
 from .win_input import SendInputMouse, capture_client, f8_pressed
+from .palette_locate import swatch_centers
 from .export import ExportError, export_pattern_csv, export_pattern_png
 from .image_pipeline import CropBox, ImageOptions, convert_image
 from .palette import PALETTE, palette_index_to_number
@@ -844,7 +845,9 @@ class PixelHelperApp:
                 self._finish_autofill("自动填色未开始：当前前台窗口不是校准时确认的游戏窗口，因此未发送任何点击。")
                 return
             client_area = get_foreground_client_area(target_window)
-            runner = AutoFillRunner(SendInputMouse(target_window))
+            driver = SendInputMouse(target_window)
+            runner = AutoFillRunner(driver)
+            scaled = self.calibration.for_client(client_area)
 
             def should_abort() -> bool:
                 if f8_pressed():
@@ -853,6 +856,31 @@ class PixelHelperApp:
                     return True
                 return self.calibration is None or not is_calibrated_window_foreground(self.calibration)
 
+            # 实时“认色块”选色：不靠滚动偏移，每色当场截图找它真正的色块（找不到就滚动再找）。
+            palette = self.calibration.palette
+            margin = max(8, round(palette.width * 0.06))
+            palette_roi = (palette.x - margin, palette.y - margin, palette.x + palette.width + margin, palette.y + palette.height + margin)
+            centers_cache: list[dict[int, tuple[float, float]] | None] = [None]
+
+            def refresh_centers() -> None:
+                centers_cache[0] = swatch_centers(capture_client(target_window), palette_roi)
+
+            def select_color(color_index: int) -> bool:
+                for _ in range(4):
+                    if should_abort():
+                        return False
+                    if centers_cache[0] is None:
+                        refresh_centers()
+                    position = centers_cache[0].get(color_index) if centers_cache[0] else None
+                    if position is not None:
+                        driver.click(client_area.left + round(position[0]), client_area.top + round(position[1]))
+                        return True
+                    anchor_x, anchor_y = scaled.scroll_point()
+                    for _ in range(3):
+                        driver.scroll(-1, anchor_x, anchor_y)
+                    refresh_centers()
+                return False
+
             completed = runner.run(
                 self.pattern,
                 self.calibration,
@@ -860,6 +888,7 @@ class PixelHelperApp:
                 self._on_progress,
                 client_area,
                 should_abort=should_abort,
+                select_color=select_color,
             )
             self._finish_autofill("自动填色完成。" if completed else "自动填色已停止：游戏窗口失去前台或用户已取消；已完成部分保留在游戏画布，可按图纸继续。")
         except Exception as exc:  # pyautogui 的安全停止异常也必须恢复界面。

@@ -56,6 +56,7 @@ class AutoFillRunner:
         client_area: ClientArea | None = None,
         target_is_active: Callable[[], bool] | None = None,
         should_abort: Callable[[], bool] | None = None,
+        select_color: Callable[[int], bool] | None = None,
     ) -> bool:
         if calibration is None:
             raise ValueError("尚未完成校准。请先打开游戏拼豆编辑器并完成手动校准。")
@@ -73,10 +74,14 @@ class AutoFillRunner:
         total = pattern.non_white_count
         completed = 0
         lower_palette_visible = False
+        selected_ok = True
         for step in build_fill_steps(pattern):
             if aborted():
                 return False
             if step.kind == "scroll":
+                # 实时“认色块”选色时，滚动由 select_color 内部处理，跳过固定偏移滚动步。
+                if select_color is not None:
+                    continue
                 x, y = scaled.scroll_point()
                 # 拆成多次单刻度滚动，每次重锚，避免 Unity 把一次大滚动只算一格。
                 for _ in range(scaled.source.scroll_clicks):
@@ -85,9 +90,15 @@ class AutoFillRunner:
                     self.mouse.scroll(-1, x, y)
                 lower_palette_visible = True
             elif step.kind == "select":
-                x, y = scaled.palette_center(step.color_index, "bottom" if lower_palette_visible else "top")
-                self.mouse.click(x, y)
+                if select_color is not None:
+                    selected_ok = select_color(step.color_index)
+                else:
+                    x, y = scaled.palette_center(step.color_index, "bottom" if lower_palette_visible else "top")
+                    self.mouse.click(x, y)
             else:
+                # 实时选色失败时跳过该色格子，不在未选中颜料的情况下盲点。
+                if select_color is not None and not selected_ok:
+                    continue
                 assert step.row is not None and step.column is not None
                 x, y = scaled.grid_cell_center(step.row, step.column)
                 self.mouse.click(x, y)
