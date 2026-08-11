@@ -13,7 +13,7 @@ from pathlib import Path
 from tkinter import BooleanVar, IntVar, StringVar, Tk, Toplevel, filedialog, messagebox, ttk
 from tkinter import Canvas
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 
 from .autofill import AutoFillRunner, build_residual_pattern
 from .calibration import Calibration, CalibrationError, ClientArea, Rect, calibration_from_capture, viewport_seed
@@ -596,6 +596,8 @@ class PixelHelperApp:
         self.start_button.pack(fill="x", ipady=6, pady=(8, 0))
         self.cancel_button = ttk.Button(parent, text="停止后续点击", command=self.cancel_autofill, state="disabled")
         self.cancel_button.pack(fill="x", ipady=6, pady=(6, 0))
+        self.debug_fill = BooleanVar(value=False)
+        ttk.Checkbutton(parent, text="保存填色调试图（排错用）", variable=self.debug_fill).pack(anchor="w", pady=(6, 0))
 
     def _load_calibration(self) -> Calibration | None:
         try:
@@ -886,10 +888,41 @@ class PixelHelperApp:
             margin = max(8, round(palette.width * 0.06))
             palette_roi = (palette.x - margin, palette.y - margin, palette.x + palette.width + margin, palette.y + palette.height + margin)
             centers_cache: list[dict[int, tuple[float, float]] | None] = [None]
+            last_shot: list[Image.Image | None] = [None]
             page_state = ["top"]  # 确定性翻页：顶页色号 1–24 / 底页 17–40
 
+            debug_dir: Path | None = None
+            if self.debug_fill.get():
+                debug_dir = application_data_directory() / f"fill_debug_{int(time.time())}"
+                debug_dir.mkdir(parents=True, exist_ok=True)
+            debug_seq = [0]
+
             def refresh_centers() -> None:
-                centers_cache[0] = swatch_centers(capture_client(target_window), palette_roi)
+                shot = capture_client(target_window)
+                last_shot[0] = shot
+                centers_cache[0] = swatch_centers(shot, palette_roi)
+
+            def save_debug(color_index: int, position: tuple[float, float] | None) -> None:
+                if debug_dir is None or last_shot[0] is None:
+                    return
+                debug_seq[0] += 1
+                centers = centers_cache[0] or {}
+                annotated = last_shot[0].convert("RGB").copy()
+                draw = ImageDraw.Draw(annotated)
+                for idx, (cx, cy) in centers.items():
+                    draw.ellipse((cx - 4, cy - 4, cx + 4, cy + 4), outline=(0, 255, 0), width=2)
+                    draw.text((cx + 5, cy - 6), str(idx + 1), fill=(0, 255, 0))
+                if position is not None:
+                    px, py = position
+                    draw.line((px - 10, py, px + 10, py), fill=(255, 0, 0), width=2)
+                    draw.line((px, py - 10, px, py + 10), fill=(255, 0, 0), width=2)
+                left, top, right, bottom = palette_roi
+                pad = 30
+                crop = annotated.crop((max(0, left - pad), max(0, top - pad), min(annotated.width, right + pad), min(annotated.height, bottom + pad)))
+                crop.save(debug_dir / f"{debug_seq[0]:03d}_target{color_index + 1}_{page_state[0]}.png")
+                found = "找到" if position is not None else "未找到"
+                with open(debug_dir / "log.txt", "a", encoding="utf-8") as fh:
+                    fh.write(f"#{debug_seq[0]:03d} 目标色号{color_index + 1} 页{page_state[0]} {found} 当前页识别到色号={sorted(i + 1 for i in centers)}\n")
 
             def scroll_palette(direction: int) -> None:
                 # direction=-1 下翻（露出底页 17–40），+1 上翻（回顶页）；过量滚动 saturate 到末页。
@@ -918,6 +951,7 @@ class PixelHelperApp:
                 if centers_cache[0] is None:
                     refresh_centers()
                 position = centers_cache[0].get(color_index) if centers_cache[0] else None
+                save_debug(color_index, position)
                 if position is not None:
                     driver.click(client_area.left + round(position[0]), client_area.top + round(position[1]))
                     return True
@@ -962,7 +996,10 @@ class PixelHelperApp:
                     self.ui_events.put(("finish", f"复检补漏中：还有 {residual.non_white_count} 格待修…"))
                     reset_palette_to_top()
                     runner.run(residual, self.calibration, self.cancel_event, self._on_progress, client_area, should_abort=should_abort, select_color=select_color)
-            self._finish_autofill("自动填色完成（已复检补漏）。如仍有个别格不对，可开“显示色号”对照手动修改。" if completed else "自动填色已停止：游戏窗口失去前台或用户已取消；已完成部分保留在游戏画布，可按图纸继续。")
+            done_msg = "自动填色完成（已复检补漏）。如仍有个别格不对，可开“显示色号”对照手动修改。"
+            if debug_dir is not None:
+                done_msg = f"自动填色完成。调试图已保存到：{debug_dir}（请整个文件夹发给开发者排错）。"
+            self._finish_autofill(done_msg if completed else "自动填色已停止：游戏窗口失去前台或用户已取消；已完成部分保留在游戏画布，可按图纸继续。")
         except Exception as exc:  # pyautogui 的安全停止异常也必须恢复界面。
             self._finish_autofill(f"自动填色未开始或已中断：{exc}。请确认游戏为前台、校准有效后重试。")
 
