@@ -94,12 +94,6 @@ def prepare_square(image: Image.Image, options: ImageOptions) -> Image.Image:
     return square
 
 
-def enhance_for_pixel_art(image: Image.Image) -> Image.Image:
-    """轻度拉开缩小后相邻像素的明暗与饱和度，保留人物关键特征。"""
-    enhanced = ImageEnhance.Contrast(image).enhance(1.4)
-    return ImageEnhance.Color(enhanced).enhance(1.12)
-
-
 def _resample_filter(mode: ResampleMode) -> Image.Resampling:
     return Image.Resampling.NEAREST if mode == "nearest" else Image.Resampling.LANCZOS
 
@@ -108,8 +102,10 @@ def convert_image(image: Image.Image, options: ImageOptions | None = None) -> Pa
     options = options or ImageOptions()
     prepared = prepare_square(image, options)
     small = prepared.resize((GRID_SIZE, GRID_SIZE), _resample_filter(options.resample))
-    enhanced = enhance_for_pixel_art(small)
-    colors = [enhanced.getpixel((column, row)) for row in range(GRID_SIZE) for column in range(GRID_SIZE)]
+    # 仅提升饱和度让配色更鲜艳（40 色多为低饱和，缩小后易发灰）；
+    # 不做强对比度增强，避免把中间调推向黑白导致偏色。饱和度更高也让色相更明确、匹配更准。
+    small = ImageEnhance.Color(small).enhance(1.2)
+    colors = [small.getpixel((column, row)) for row in range(GRID_SIZE) for column in range(GRID_SIZE)]
     initial = [nearest_palette_index(color, options.matcher) for color in colors]
     candidates: tuple[int, ...] | None = None
     if options.reduce_colors:

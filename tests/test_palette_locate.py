@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw
 
 from ark_pixel_helper.calibration import ClientArea, Rect, calibration_from_capture, viewport_seed
 from ark_pixel_helper.palette import PALETTE
-from ark_pixel_helper.palette_locate import detect_palette_rect, swatch_centers
+from ark_pixel_helper.palette_locate import detect_palette_rect, locate_page_swatch_cells, swatch_centers
 
 CANVAS = Rect(369, 148, 700, 700)
 
@@ -97,6 +97,74 @@ def test_detect_palette_rect_recovers_geometry_when_captured_on_second_page():
 def test_detect_palette_rect_returns_none_without_swatches():
     blank = Image.new("RGB", (1550, 860), (232, 232, 232))
     assert detect_palette_rect(blank, CANVAS) is None
+
+
+def _palette_roi(palette_rect: Rect) -> tuple[int, int, int, int]:
+    margin = max(8, round(palette_rect.width * 0.06))
+    return (
+        palette_rect.x - margin,
+        palette_rect.y - margin,
+        palette_rect.x + palette_rect.width + margin,
+        palette_rect.y + palette_rect.height + margin,
+    )
+
+
+def _cell_center(palette_rect: Rect, page_pos: int) -> tuple[float, float]:
+    col, row = page_pos % 4, page_pos // 4
+    return (
+        palette_rect.x + palette_rect.width * (col + 0.5) / 4,
+        palette_rect.y + palette_rect.height * (row + 0.5) / 6,
+    )
+
+
+def _synthetic_page(palette_rect: Rect, page_top: int) -> Image.Image:
+    """在灰底面板上画一页 4×6 色板（page_top=0 顶页索引0–23 / 16 底页索引16–39）。"""
+    image = Image.new("RGB", (1600, 900), (232, 232, 232))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((palette_rect.x - 40, palette_rect.y - 60, palette_rect.x + palette_rect.width + 40, palette_rect.y + palette_rect.height + 40), fill=(58, 58, 60))
+    half_w = palette_rect.width / 4 * 0.4
+    half_h = palette_rect.height / 6 * 0.4
+    for page_pos in range(24):
+        cx, cy = _cell_center(palette_rect, page_pos)
+        draw.rectangle((cx - half_w, cy - half_h, cx + half_w, cy + half_h), fill=PALETTE[page_top + page_pos])
+    return image
+
+
+def test_locate_page_swatch_cells_top_page():
+    palette_rect = Rect(1150, 330, 320, 456)
+    image = _synthetic_page(palette_rect, 0)
+
+    cells = locate_page_swatch_cells(image, _palette_roi(palette_rect), 0)
+
+    assert cells is not None
+    assert set(cells) == set(range(24))
+    # 肤色 idx 8（col0,row2）几何格心落在自己真实格，且与 idx 7（col3,row1）列级分开。
+    exp8 = _cell_center(palette_rect, 8)
+    assert abs(cells[8][0] - exp8[0]) <= 4 and abs(cells[8][1] - exp8[1]) <= 4
+    assert abs(cells[8][0] - cells[7][0]) >= palette_rect.width / 4 - 4
+    # 近白 idx 10（属 _AMBIGUOUS，质心法会失手）也精确落在真实几何位置。
+    exp10 = _cell_center(palette_rect, 10)
+    assert abs(cells[10][0] - exp10[0]) <= 4 and abs(cells[10][1] - exp10[1]) <= 4
+
+
+def test_locate_page_swatch_cells_bottom_page():
+    palette_rect = Rect(1150, 330, 320, 456)
+    image = _synthetic_page(palette_rect, 16)
+
+    cells = locate_page_swatch_cells(image, _palette_roi(palette_rect), 16)
+
+    assert cells is not None
+    assert set(cells) == set(range(16, 40))
+    # idx 34 → 页内位置 18（col2,row4）；idx 35 → 页内位置 19（col3,row4）。
+    exp34 = _cell_center(palette_rect, 34 - 16)
+    exp35 = _cell_center(palette_rect, 35 - 16)
+    assert abs(cells[34][0] - exp34[0]) <= 4 and abs(cells[34][1] - exp34[1]) <= 4
+    assert abs(cells[35][0] - exp35[0]) <= 4 and abs(cells[35][1] - exp35[1]) <= 4
+
+
+def test_locate_page_swatch_cells_returns_none_on_blank():
+    blank = Image.new("RGB", (1600, 900), (150, 150, 150))
+    assert locate_page_swatch_cells(blank, (1000, 200, 1600, 800), 0) is None
 
 
 def test_calibration_from_capture_detects_grid_and_palette_together():

@@ -60,9 +60,27 @@ def nearest_palette_index(rgb: RGB, matcher: Matcher = "oklab", candidates: tupl
     if matcher == "rgb":
         target = tuple(float(value) for value in rgb)
         palette_values = PALETTE
+
+        def distance(index: int) -> float:
+            palette = palette_values[index]
+            return sum((target[i] - palette[i]) ** 2 for i in range(3))
+
     elif matcher == "oklab":
         target = rgb_to_oklab(rgb)
         palette_values = tuple(rgb_to_oklab(color) for color in PALETTE)
+
+        def distance(index: int) -> float:
+            palette = palette_values[index]
+            # 压低明度(L)权重、突出色度(a,b)：低饱和色不再被明度相近的异色相抢走
+            # （否则冷青灰会被匹配成明度接近的暖褐/橄榄，整体偏色）。
+            dist = 0.5 * (target[0] - palette[0]) ** 2 + (target[1] - palette[1]) ** 2 + (target[2] - palette[2]) ** 2
+            # 冷暖跨界惩罚：明度权重被压低后，低饱和色易被明度相近的相反色相抢走
+            # （暗青灰落暖藕紫、金棕发落橄榄绿）。目标与候选在红/青绿轴(a)符号相反时加惩罚，
+            # 双向锁定色相符号，冷色留冷、暖色留暖（40 色缺中间过渡色的取舍）。
+            if (target[1] < -0.005 and palette[1] > 0.005) or (target[1] > 0.005 and palette[1] < -0.005):
+                dist += 20.0 * (palette[1] - target[1]) ** 2
+            return dist
+
     else:
         raise ValueError(f"不支持的颜色匹配方式：{matcher}")
-    return min(indices, key=lambda index: sum((target[i] - palette_values[index][i]) ** 2 for i in range(3)))
+    return min(indices, key=distance)

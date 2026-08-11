@@ -105,6 +105,35 @@ def _median(values: list[float]) -> float:
 _AMBIGUOUS = {1, 2, 3, 10, 11, 12}
 
 
+def _fit_page_grid(
+    usable: dict[int, tuple[float, float]], page_top: int
+) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """用高置信纯色锚点最小二乘拟合当前色板页的 4 列 / 6 行网格线。
+
+    返回 (col_fit=(a, b), row_fit=(e, f))：cx=a*col+b（a=width/4），cy=e*row+f（e=height/6）。
+    锚点不足（<8 个、列不齐 4、行不足 3）或斜率非正时返回 None。
+    """
+    cols_present = {(i - page_top) % 4 for i in usable}
+    rows_present = {(i - page_top) // 4 for i in usable}
+    if len(usable) < 8 or len(cols_present) < 4 or len(rows_present) < 3:
+        return None
+    col_points = [(col, _median([c[0] for i, c in usable.items() if (i - page_top) % 4 == col])) for col in sorted(cols_present)]
+    row_points = [(row, _median([c[1] for i, c in usable.items() if (i - page_top) // 4 == row])) for row in sorted(rows_present)]
+    col_fit = _linfit(col_points)
+    row_fit = _linfit(row_points)
+    if col_fit is None or row_fit is None:
+        return None
+    a, _b = col_fit
+    e, _f = row_fit
+    if a <= 0 or e <= 0:
+        return None
+    return col_fit, row_fit
+
+
+def _usable_anchors(centers: dict[int, tuple[float, float]], page_top: int) -> dict[int, tuple[float, float]]:
+    return {i: c for i, c in centers.items() if page_top <= i < page_top + 24 and i not in _AMBIGUOUS}
+
+
 def detect_palette_rect(image: Image.Image, canvas_grid_rect: Rect, tol: int = 35, min_pixels: int = 80) -> Rect | None:
     """识别色板面板矩形（4 列 × 6 行）。面板屏幕位置固定、只是滚动换内容，
     故**不论当前在第几页都应得到同一矩形**：先判页（顶页色号1–24/底页 17–40），
@@ -118,23 +147,38 @@ def detect_palette_rect(image: Image.Image, canvas_grid_rect: Rect, tol: int = 3
     top_only = sum(1 for i in centers if i < 16)
     bottom_only = sum(1 for i in centers if i >= 24)
     page_top = 0 if top_only >= bottom_only else 16
-    usable = {i: c for i, c in centers.items() if page_top <= i < page_top + 24 and i not in _AMBIGUOUS}
-    cols_present = {i % 4 for i in usable}
-    rows_present = {(i - page_top) // 4 for i in usable}
-    if len(usable) < 8 or len(cols_present) < 4 or len(rows_present) < 3:
+    fit = _fit_page_grid(_usable_anchors(centers, page_top), page_top)
+    if fit is None:
         return None
-    col_points = [(col, _median([c[0] for i, c in usable.items() if i % 4 == col])) for col in sorted(cols_present)]
-    row_points = [(row, _median([c[1] for i, c in usable.items() if (i - page_top) // 4 == row])) for row in sorted(rows_present)]
-    col_fit = _linfit(col_points)
-    row_fit = _linfit(row_points)
-    if col_fit is None or row_fit is None:
-        return None
-    a, b = col_fit  # cx = a*col + b，a=width/4，b=x+a/2
-    e, f = row_fit  # cy = e*row + f，e=height/6，f=y+e/2
-    if a <= 0 or e <= 0:
-        return None
+    (a, b), (e, f) = fit  # cx=a*col+b，a=width/4，b=x+a/2；cy=e*row+f，e=height/6，f=y+e/2
     width = a * 4
     height = e * _TOP_PAGE_ROWS
     if width <= 0 or height <= 0:
         return None
     return Rect(round(b - a / 2), round(f - e / 2), round(width), round(height))
+
+
+def locate_page_swatch_cells(
+    image: Image.Image,
+    roi: tuple[int, int, int, int],
+    page_top: int,
+    tol: int = 35,
+    min_pixels: int = 80,
+) -> dict[int, tuple[float, float]] | None:
+    """拟合当前色板页 4×6 网格，返回该页全部 24 个色号索引 -> (图像坐标 x, y) 几何格心。
+
+    只用高置信纯色锚点（跳过 _AMBIGUOUS 近白/肤色）最小二乘拟合行/列线，再按每个色号
+    固定 col=(k-page_top)%4 / row=(k-page_top)//4 几何反算格心——歧义近似色也能精确定位。
+    page_top 只能是 0（顶页色号1-24）或 16（底页色号17-40）。锚点不足以拟合时返回 None。
+    """
+    if page_top not in (0, 16):
+        raise ValueError("page_top 只能是 0（顶页）或 16（底页）")
+    centers = _swatch_centers(image, roi, tol, min_pixels)
+    fit = _fit_page_grid(_usable_anchors(centers, page_top), page_top)
+    if fit is None:
+        return None
+    (a, b), (e, f) = fit
+    return {
+        k: (a * ((k - page_top) % 4) + b, e * ((k - page_top) // 4) + f)
+        for k in range(page_top, page_top + 24)
+    }
