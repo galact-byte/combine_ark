@@ -368,7 +368,7 @@ def get_foreground_client_area(handle: int | None = None) -> ClientArea:
 
 
 class PixelHelperApp:
-    CELL_SIZE = 22
+    CELL_SIZE = 24
 
     def __init__(self, root: Tk) -> None:
         self.root = root
@@ -687,8 +687,15 @@ class PixelHelperApp:
                 width = 2 if selected else 1
                 self.canvas.create_rectangle(x0, y0, x0 + self.CELL_SIZE, y0 + self.CELL_SIZE, fill=self._hex(PALETTE[index]), outline=outline, width=width)
                 if self.show_numbers.get() and self.CELL_SIZE >= 18:
-                    text_color = "#101413" if sum(PALETTE[index]) > 420 else "#f5f7f6"
-                    self.canvas.create_text(x0 + self.CELL_SIZE / 2, y0 + self.CELL_SIZE / 2, text=str(index + 1), fill=text_color, font=("Cascadia Mono", 7))
+                    r, g, b = PALETTE[index]
+                    luminance = 0.299 * r + 0.587 * g + 0.114 * b
+                    text_color = "#0c0f0e" if luminance > 150 else "#ffffff"
+                    shadow = "#ffffff" if luminance > 150 else "#0c0f0e"
+                    cx, cy = x0 + self.CELL_SIZE / 2, y0 + self.CELL_SIZE / 2
+                    label = str(index + 1)
+                    # 对比阴影：任何底色下色号都清晰可读，方便对照游戏手动补色。
+                    self.canvas.create_text(cx + 1, cy + 1, text=label, fill=shadow, font=("Microsoft YaHei UI", 9, "bold"))
+                    self.canvas.create_text(cx, cy, text=label, fill=text_color, font=("Microsoft YaHei UI", 9, "bold"))
         self.palette_canvas.delete("all")
         for index, color in enumerate(PALETTE):
             column, row = index % 4, index // 4
