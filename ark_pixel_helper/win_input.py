@@ -154,7 +154,7 @@ def capture_client(hwnd: int):
 class SendInputMouse:
     """SendInput 双路注入：先发相对位移喂 Raw Input，再发绝对坐标校系统光标。"""
 
-    PAUSE = 0.03
+    PAUSE = 0.04
 
     def __init__(self, hwnd: int | None = None) -> None:
         _require_windows()
@@ -179,19 +179,17 @@ class SendInputMouse:
         self._emit(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, ax, ay)
 
     def click(self, x: int, y: int) -> None:
-        # 路径①：相对位移喂 Unity Raw Input。
-        dx, dy = relative_delta(self._prev, (x, y))
-        if (dx, dy) != (0, 0):
-            self.move_relative(dx, dy)
-        else:
-            self.move_relative(1, 0)
-            self.move_relative(-1, 0)
-        # 路径②：绝对坐标校准系统光标后点击。
+        # 路径①：小幅相对位移生成 Raw Input 事件保持 Unity 输入活性（不用全量 delta，
+        # 避免指针加速把光标甸远造成偶发漏点/错格）。
+        self.move_relative(1, 0)
+        self.move_relative(-1, 0)
+        # 路径②：绝对坐标校准系统光标，留足时间给游戏处理移动后再点击。
         self._move_absolute(x, y)
         time.sleep(self.PAUSE)
         self._emit(MOUSEEVENTF_LEFTDOWN)
-        time.sleep(self.PAUSE / 2)
+        time.sleep(self.PAUSE)
         self._emit(MOUSEEVENTF_LEFTUP)
+        time.sleep(self.PAUSE)  # 落点结束后再隔一拍，避免连续点击太快被游戏丢弃。
         self._prev = (x, y)
 
     def scroll(self, clicks: int, x: int, y: int) -> None:
