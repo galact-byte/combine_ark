@@ -568,6 +568,8 @@ class PixelHelperApp:
         top.pack(fill="x", pady=(0, 10))
         ttk.Label(top, text="实时预览", style="Section.TLabel").pack(side="left")
         ttk.Checkbutton(top, text="显示色号", variable=self.show_numbers, command=self._refresh_pattern).pack(side="right")
+        self.debug_fill = BooleanVar(value=False)
+        ttk.Checkbutton(top, text="保存填色调试图", variable=self.debug_fill).pack(side="right", padx=(0, 12))
         self.canvas = Canvas(parent, width=GRID_SIZE * self.CELL_SIZE + 2, height=GRID_SIZE * self.CELL_SIZE + 2, bg=CANVAS_BG, highlightthickness=1, highlightbackground=BORDER, cursor="crosshair")
         self.canvas.pack(anchor="center", pady=(0, 10))
         self.canvas.bind("<Button-1>", self._select_canvas_cell)
@@ -596,8 +598,6 @@ class PixelHelperApp:
         self.start_button.pack(fill="x", ipady=6, pady=(8, 0))
         self.cancel_button = ttk.Button(parent, text="停止后续点击", command=self.cancel_autofill, state="disabled")
         self.cancel_button.pack(fill="x", ipady=6, pady=(6, 0))
-        self.debug_fill = BooleanVar(value=False)
-        ttk.Checkbutton(parent, text="保存填色调试图（排错用）", variable=self.debug_fill).pack(anchor="w", pady=(6, 0))
 
     def _load_calibration(self) -> Calibration | None:
         try:
