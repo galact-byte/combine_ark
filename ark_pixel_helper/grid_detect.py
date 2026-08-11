@@ -52,42 +52,55 @@ def _projections(data: bytes, width: int, height: int) -> tuple[list[float], lis
     return col_energy, row_energy
 
 
-def _find_lines(energy: list[float]) -> list[float]:
-    """在 1D 能量信号上找出网格线：阈值以上的连续簇取能量加权质心。"""
-    peak = max(energy) if energy else 0.0
-    if peak <= 0:
-        return []
-    threshold = peak * _PEAK_RATIO
-    lines: list[float] = []
-    index = 0
+def _fit_axis(energy: list[float], cells: int) -> tuple[float, float, float] | None:
+    """网格拟合：已知 cells 格（cells+1 条线），搜索最优“起点+格距”使 25 条预测线总能量最大。
+
+    对粗线（能量极强）与细线缺失都鲁棒：粗线只会帮忙锡定相位。返回 (起点, 格距, 峰/基线比)。"""
     n = len(energy)
-    while index < n:
-        if energy[index] >= threshold:
-            end = index
-            while end < n and energy[end] >= threshold:
-                end += 1
-            weight = sum(energy[k] for k in range(index, end))
-            centroid = sum(k * energy[k] for k in range(index, end)) / weight
-            lines.append(centroid)
-            index = end
-        else:
-            index += 1
-    return lines
+    if n < cells + 1:
+        return None
+    smoothed = [energy[max(0, i - 1)] + energy[i] + energy[min(n - 1, i + 1)] for i in range(n)]
+    total = sum(smoothed)
+    if total <= 0:
+        return None
+    baseline = total / n
 
+    def score(left: float, pitch: float) -> float:
+        acc = 0.0
+        for k in range(cells + 1):
+            index = int(round(left + k * pitch))
+            if 0 <= index < n:
+                acc += smoothed[index]
+        return acc
 
-def _score(lines: list[float], expected: int, tol: float) -> float:
-    """按数量接近度与间距均匀度给这一轴的识别打分（0..1）。"""
-    if len(lines) < 2 or len(lines) < expected * 0.6:
-        return 0.0
-    diffs = [b - a for a, b in zip(lines, lines[1:])]
-    ordered = sorted(diffs)
-    median = ordered[len(ordered) // 2]
-    if median <= 0:
-        return 0.0
-    within = sum(1 for d in diffs if abs(d - median) <= tol * median)
-    uniformity = within / len(diffs)
-    count_score = 1.0 - min(1.0, abs(len(lines) - expected) / expected)
-    return uniformity * count_score
+    best_score, best_left, best_pitch = -1.0, 0.0, 0.0
+    pitch = (n * 0.5) / cells
+    pitch_max = (n * 1.0) / cells
+    while pitch <= pitch_max:
+        max_left = n - 1 - cells * pitch
+        left = 0.0
+        while left <= max_left:
+            current = score(left, pitch)
+            if current > best_score:
+                best_score, best_left, best_pitch = current, left, pitch
+            left += 1.0
+        pitch += 0.2
+    if best_pitch <= 0:
+        return None
+    # 亚像素细化
+    refined_left, refined_pitch = best_left, best_pitch
+    left = best_left - 1.5
+    while left <= best_left + 1.5:
+        pitch = best_pitch - 0.3
+        while pitch <= best_pitch + 0.3:
+            if pitch > 0:
+                current = score(left, pitch)
+                if current > best_score:
+                    best_score, refined_left, refined_pitch = current, left, pitch
+            pitch += 0.05
+        left += 0.25
+    ratio = (best_score / (cells + 1)) / baseline if baseline > 0 else 0.0
+    return refined_left, refined_pitch, ratio
 
 
 def detect_grid(
@@ -111,10 +124,18 @@ def detect_grid(
     if width < expected_lines or height < expected_lines:
         return None
     col_energy, row_energy = _projections(gray.tobytes(), width, height)
-    x_lines = [x + origin_x for x in _find_lines(col_energy)]
-    y_lines = [y + origin_y for y in _find_lines(row_energy)]
-    confidence = min(_score(x_lines, expected_lines, tol), _score(y_lines, expected_lines, tol))
-    if confidence < min_confidence or len(x_lines) < 2 or len(y_lines) < 2:
+    fit_x = _fit_axis(col_energy, expected_cells)
+    fit_y = _fit_axis(row_energy, expected_cells)
+    if fit_x is None or fit_y is None:
         return None
+    left_x, pitch_x, ratio_x = fit_x
+    left_y, pitch_y, ratio_y = fit_y
+    # 峰/基线比 → 置信度：约 1 为无网格，越大线越清晰。
+    confidence = min(max(0.0, (ratio_x - 1.3) / 2.0), max(0.0, (ratio_y - 1.3) / 2.0))
+    confidence = min(1.0, confidence)
+    if confidence < min_confidence:
+        return None
+    x_lines = [origin_x + left_x + k * pitch_x for k in range(expected_lines)]
+    y_lines = [origin_y + left_y + k * pitch_y for k in range(expected_lines)]
     bbox = (round(x_lines[0]), round(y_lines[0]), round(x_lines[-1]), round(y_lines[-1]))
     return GridResult(bbox, x_lines, y_lines, confidence)
