@@ -1,7 +1,7 @@
 import pytest
 from PIL import Image
 
-from ark_pixel_helper.image_pipeline import CropBox, ImageOptions, compose_image, convert_image, enhance_for_pixel_art, prepare_square
+from ark_pixel_helper.image_pipeline import CropBox, ImageOptions, compose_image, convert_image, prepare_square
 from ark_pixel_helper.palette import WHITE_INDEX
 
 
@@ -69,7 +69,8 @@ def test_optional_dithering_distributes_a_flat_intermediate_color_between_palett
     assert len({color for row in pattern.cells for color in row}) > 1
 
 
-def test_dithering_uses_the_same_enhanced_pixels_as_the_non_dither_path(monkeypatch):
+def test_dithering_uses_the_same_true_color_pixels_as_the_non_dither_path(monkeypatch):
+    # 忠于原图：抖动路径拿到的应是缩小后的真实颜色，不再经对比度/饱和度增强。
     image = Image.new("RGB", (24, 24), (100, 100, 100))
     image.putpixel((1, 0), (156, 156, 156))
     received: list[tuple[int, int, int]] = []
@@ -79,9 +80,9 @@ def test_dithering_uses_the_same_enhanced_pixels_as_the_non_dither_path(monkeypa
         return [0] * (24 * 24)
 
     monkeypatch.setattr("ark_pixel_helper.image_pipeline._dither", capture_dither)
-    convert_image(image, ImageOptions(reduce_colors=False, dither=True))
+    convert_image(image, ImageOptions(reduce_colors=False, dither=True, resample="nearest"))
 
-    assert received[0] != (100, 100, 100) or received[1] != (156, 156, 156)
+    assert received[0] == (100, 100, 100) and received[1] == (156, 156, 156)
 
 
 def test_compose_image_returns_white_backed_rgb():
@@ -117,10 +118,13 @@ def test_image_options_preserve_more_color_detail_by_default():
     assert ImageOptions().reduce_colors is False
 
 
-def test_enhancement_increases_local_luminance_separation_before_quantization():
-    image = Image.new("RGB", (3, 1))
-    image.putdata([(100, 100, 100), (128, 128, 128), (156, 156, 156)])
+def test_conversion_preserves_true_colors_without_contrast_or_saturation_boost():
+    # 忠于原图：一块纯中灰缩小量化后应落在最近的中性色，不因增强被推向黑或白。
+    from ark_pixel_helper.palette import nearest_palette_index
 
-    enhanced = enhance_for_pixel_art(image)
+    image = Image.new("RGB", (24, 24), (128, 128, 128))
 
-    assert enhanced.getpixel((2, 0))[0] - enhanced.getpixel((0, 0))[0] > 56
+    pattern = convert_image(image, ImageOptions(resample="nearest", matcher="rgb"))
+    expected = nearest_palette_index((128, 128, 128), "rgb")
+
+    assert all(color == expected for row in pattern.cells for color in row)

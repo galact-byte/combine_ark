@@ -18,7 +18,7 @@ from PIL import Image, ImageDraw, ImageTk
 from .autofill import AutoFillRunner, build_residual_pattern
 from .calibration import Calibration, CalibrationError, ClientArea, Rect, calibration_from_capture, viewport_seed
 from .win_input import SendInputMouse, capture_client, f8_pressed
-from .palette_locate import swatch_centers
+from .palette_locate import locate_page_swatch_cells
 from .export import ExportError, export_pattern_csv, export_pattern_png
 from .image_pipeline import CropBox, ImageOptions, convert_image
 from .palette import PALETTE, nearest_palette_index, palette_index_to_number
@@ -900,7 +900,9 @@ class PixelHelperApp:
             def refresh_centers() -> None:
                 shot = capture_client(target_window)
                 last_shot[0] = shot
-                centers_cache[0] = swatch_centers(shot, palette_roi)
+                page_top = 16 if page_state[0] == "bottom" else 0
+                # 几何拟合当前页 4×6 网格，按每个色号固定行列反算格心——歧义近似色也能精确命中。
+                centers_cache[0] = locate_page_swatch_cells(shot, palette_roi, page_top)
 
             def save_debug(color_index: int, position: tuple[float, float] | None) -> None:
                 if debug_dir is None or last_shot[0] is None:
