@@ -43,6 +43,19 @@ def build_fill_steps(pattern: Pattern) -> list[FillStep]:
     return steps
 
 
+def build_residual_pattern(pattern: Pattern, rendered: list[list[int]]) -> Pattern:
+    """根据截图识别到的当前画布 rendered（每格最近色号索引）与目标图案比对，
+    返回仅包含“应上色但当前不符”格子的残留图案（其余为白），供填后复检重填。"""
+    residual = Pattern.blank()
+    for row, values in enumerate(pattern.cells):
+        for column, expected in enumerate(values):
+            if expected == WHITE_INDEX:
+                continue
+            if rendered[row][column] != expected:
+                residual.set_cell(row, column, expected)
+    return residual
+
+
 class AutoFillRunner:
     def __init__(self, mouse: MouseDriver) -> None:
         self.mouse = mouse

@@ -15,13 +15,13 @@ from tkinter import Canvas
 
 from PIL import Image, ImageTk
 
-from .autofill import AutoFillRunner
+from .autofill import AutoFillRunner, build_residual_pattern
 from .calibration import Calibration, CalibrationError, ClientArea, Rect, calibration_from_capture
 from .win_input import SendInputMouse, capture_client, f8_pressed
 from .palette_locate import swatch_centers
 from .export import ExportError, export_pattern_csv, export_pattern_png
 from .image_pipeline import CropBox, ImageOptions, convert_image
-from .palette import PALETTE, palette_index_to_number
+from .palette import PALETTE, nearest_palette_index, palette_index_to_number
 from .pattern import GRID_SIZE, Pattern
 
 BG = "#e3f2ef"
@@ -885,9 +885,32 @@ class PixelHelperApp:
                     anchor_x, anchor_y = scaled.scroll_point()
                     for _ in range(3):
                         driver.scroll(-1, anchor_x, anchor_y)
+                    time.sleep(0.35)  # 等色板滚动动画停稳再截图，避免抓到过渡态导致选色错位
                     refresh_centers()
                 return False
 
+            def reset_palette_to_top() -> None:
+                # 先把色板滚回顶页，保证从色号 0 开始能找到（否则用户遗留在底页会漏前排色）。
+                anchor_x, anchor_y = scaled.scroll_point()
+                for _ in range(10):
+                    driver.scroll(1, anchor_x, anchor_y)
+                time.sleep(0.35)  # 等滚动动画停稳
+                centers_cache[0] = None
+
+            def sample_rendered() -> list[list[int]]:
+                shot = capture_client(target_window)
+                grid: list[list[int]] = []
+                for row in range(24):
+                    line: list[int] = []
+                    for column in range(24):
+                        sx, sy = scaled.grid_cell_center(row, column)
+                        rx = min(max(0, round(sx - client_area.left)), shot.width - 1)
+                        ry = min(max(0, round(sy - client_area.top)), shot.height - 1)
+                        line.append(nearest_palette_index(shot.getpixel((rx, ry)), "rgb"))
+                    grid.append(line)
+                return grid
+
+            reset_palette_to_top()
             completed = runner.run(
                 self.pattern,
                 self.calibration,
@@ -897,7 +920,18 @@ class PixelHelperApp:
                 should_abort=should_abort,
                 select_color=select_color,
             )
-            self._finish_autofill("自动填色完成。" if completed else "自动填色已停止：游戏窗口失去前台或用户已取消；已完成部分保留在游戏画布，可按图纸继续。")
+            # 填后复检：截图比对图案，只重填“应上色却不符”的格子（漏格/错色），幂等安全，最多 2 遍。
+            if completed and not self.cancel_event.is_set():
+                for _ in range(2):
+                    if should_abort():
+                        break
+                    residual = build_residual_pattern(self.pattern, sample_rendered())
+                    if residual.non_white_count == 0:
+                        break
+                    self.ui_events.put(("finish", f"复检补漏中：还有 {residual.non_white_count} 格待修…"))
+                    reset_palette_to_top()
+                    runner.run(residual, self.calibration, self.cancel_event, self._on_progress, client_area, should_abort=should_abort, select_color=select_color)
+            self._finish_autofill("自动填色完成（已复检补漏）。如仍有个别格不对，可开“显示色号”对照手动修改。" if completed else "自动填色已停止：游戏窗口失去前台或用户已取消；已完成部分保留在游戏画布，可按图纸继续。")
         except Exception as exc:  # pyautogui 的安全停止异常也必须恢复界面。
             self._finish_autofill(f"自动填色未开始或已中断：{exc}。请确认游戏为前台、校准有效后重试。")
 
