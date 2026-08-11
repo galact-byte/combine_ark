@@ -118,3 +118,24 @@ def test_runner_honors_should_abort_predicate():
 
     assert completed is False
     assert len(mouse.actions) <= 2
+
+
+def test_runner_uses_live_select_color_and_skips_geometric_scroll():
+    pattern = Pattern.blank()
+    pattern.set_cell(0, 0, 0)
+    pattern.set_cell(0, 1, 0)
+    pattern.set_cell(1, 0, 24)
+    selected: list[int] = []
+
+    def select_color(color_index: int) -> bool:
+        selected.append(color_index)
+        return color_index != 24  # 模拟后 16 色定位失败 → 该色格子跳过
+
+    mouse = FakeMouse()
+    AutoFillRunner(mouse).run(pattern, get_calibration(), Event(), select_color=select_color)
+
+    # 两种颜色都经 select_color 选，不走几何滚动步。
+    assert selected == [0, 24]
+    assert not any(action[0] == "scroll" for action in mouse.actions)
+    # 选色成功的 color 0 两格被点；color 24 选色失败其格被跳过。
+    assert mouse.actions == [("click", 110, 58), ("click", 130, 58)]

@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw
 
 from ark_pixel_helper.calibration import ClientArea, Rect, calibration_from_capture, viewport_seed
 from ark_pixel_helper.palette import PALETTE
-from ark_pixel_helper.palette_locate import detect_palette_rect
+from ark_pixel_helper.palette_locate import detect_palette_rect, swatch_centers
 
 CANVAS = Rect(369, 148, 700, 700)
 
@@ -45,6 +45,30 @@ def test_detect_palette_rect_recovers_top_page_geometry():
     assert abs(result.y - palette_rect.y) <= 6
     assert abs(result.width - palette_rect.width) <= 8
     assert abs(result.height - palette_rect.height) <= 10
+
+
+def test_swatch_centers_locates_dark_color_despite_dark_panel_background():
+    # 底页色板（索引 16–39），面板底色接近深藏蓝：验证背景不污染深色块。
+    rect = Rect(1200, 330, 320, 456)
+    image = Image.new("RGB", (1600, 900), (230, 230, 230))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((rect.x - 40, rect.y - 60, rect.x + rect.width + 40, rect.y + rect.height + 40), fill=(58, 58, 60))
+    for page_pos in range(24):  # 页内位置 0–23 → 索引 16–39
+        index = 16 + page_pos
+        col, row = page_pos % 4, page_pos // 4
+        cx = rect.x + rect.width * (col + 0.5) / 4
+        cy = rect.y + rect.height * (row + 0.5) / 6
+        draw.rectangle((cx - 30, cy - 28, cx + 30, cy + 28), fill=PALETTE[index])
+    roi = (rect.x - 20, rect.y - 20, rect.x + rect.width + 20, rect.y + rect.height + 20)
+
+    centers = swatch_centers(image, roi)
+
+    # 索引 28 深藏蓝在页内位置 12 → row3,col0，不能被底色拖到面板中心。
+    assert 28 in centers
+    exp_x = rect.x + rect.width * 0.5 / 4
+    exp_y = rect.y + rect.height * 3.5 / 6
+    assert abs(centers[28][0] - exp_x) <= 3 and abs(centers[28][1] - exp_y) <= 3
+    assert len(centers) == 24
 
 
 def test_detect_palette_rect_returns_none_without_swatches():

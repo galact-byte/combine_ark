@@ -15,7 +15,7 @@ from .palette import PALETTE
 _TOP_PAGE_ROWS = 6
 
 
-def _nearest_index(r: int, g: int, b: int, tol_sq: int) -> int | None:
+def _nearest_index(r: int, g: int, b: int, tol_sq: int, bg: tuple[int, int, int]) -> int | None:
     best: int | None = None
     best_d = tol_sq
     for index, color in enumerate(PALETTE):
@@ -23,6 +23,12 @@ def _nearest_index(r: int, g: int, b: int, tol_sq: int) -> int | None:
         if d < best_d:
             best_d = d
             best = index
+    if best is None:
+        return None
+    # 面板底色可能离某些深色块很近；离底色更近的像素当背景丢弃，避免拖偏质心。
+    d_bg = (r - bg[0]) ** 2 + (g - bg[1]) ** 2 + (b - bg[2]) ** 2
+    if d_bg <= best_d:
+        return None
     return best
 
 
@@ -44,12 +50,15 @@ def _swatch_centers(image: Image.Image, roi: tuple[int, int, int, int], tol: int
     data = crop.tobytes()
     tol_sq = tol * tol
     min_scaled = max(10, round(min_pixels / (factor * factor)))
+    # 面板底色 = ROI 众数色（色块间隙与面板边距充满），用于排除背景像素。
+    palette_counts = crop.getcolors(maxcolors=width * height)
+    bg = max(palette_counts, key=lambda item: item[0])[1] if palette_counts else (0, 0, 0)
     acc: dict[int, list[float]] = {}
     for y in range(height):
         base = y * width * 3
         for x in range(width):
             p = base + x * 3
-            index = _nearest_index(data[p], data[p + 1], data[p + 2], tol_sq)
+            index = _nearest_index(data[p], data[p + 1], data[p + 2], tol_sq, bg)
             if index is not None:
                 cell = acc.get(index)
                 if cell is None:
@@ -63,6 +72,11 @@ def _swatch_centers(image: Image.Image, roi: tuple[int, int, int, int], tol: int
         for index, cell in acc.items()
         if cell[2] >= min_scaled
     }
+
+
+def swatch_centers(image: Image.Image, roi: tuple[int, int, int, int], tol: int = 35, min_pixels: int = 200) -> dict[int, tuple[float, float]]:
+    """在 roi 内“认色块”：返回 {色号索引: (图像坐标 x, y)}。供填色时实时定位当前页色块。"""
+    return _swatch_centers(image, roi, tol, min_pixels)
 
 
 def _linfit(points: list[tuple[float, float]]) -> tuple[float, float] | None:
