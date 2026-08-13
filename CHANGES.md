@@ -1,5 +1,17 @@
 # 修改记录 — combine_ark
 
+## 2026-08-13 — 移除 pyautogui 残留，自动填色统一走 SendInput
+
+### 背景
+- 自动填色实际由 `win_input.py` 的 `SendInputMouse` 驱动（双路注入 + F8 急停）；`autofill.py` 的 `PyAutoGuiMouse` 从未被实例化，属死代码。`requirements.txt` 仍列 `pyautogui`、README 与 `ui.py` 注释也残留旧说法，三处与真实实现不一致。
+
+### 修复
+- 删除死代码 `PyAutoGuiMouse` 类；`requirements.txt` 移除 `pyautogui>=0.9.54`；`ui.py` 过时注释改为准确描述（F8 急停 / 前台校验中止）。
+- README 删除顶部冗余的"仓库地址"行，并移除整段"打包发布"说明（CI/手动打包命令与实现细节 note，属开发者信息、不放用户文档）。
+
+### 验证
+- `python -m pytest -q`：72 项通过；模块导入正常，已确认 `PyAutoGuiMouse` 移除。
+
 ## 2026-08-12 — 冷暖跨界惩罚改对称（补金棕发落橄榄绿的反向漏洞）
 
 ### 背景

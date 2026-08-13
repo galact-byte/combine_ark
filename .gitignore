@@ -16,3 +16,10 @@ GEMINI.md
 build/
 dist/
 *.spec
+
+# Trellis 自带技能文档（本地保留，可由 trellis update 重新生成，无需版本控制）
+.agents/
+
+# Trellis 运行时工具（模板生成，trellis init/update 可重建，本地保留即可）
+.trellis/scripts/
+.trellis/agents/
