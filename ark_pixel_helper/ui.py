@@ -1002,7 +1002,7 @@ class PixelHelperApp:
             if debug_dir is not None:
                 done_msg = f"自动填色完成。调试图已保存到：{debug_dir}（请整个文件夹发给开发者排错）。"
             self._finish_autofill(done_msg if completed else "自动填色已停止：游戏窗口失去前台或用户已取消；已完成部分保留在游戏画布，可按图纸继续。")
-        except Exception as exc:  # pyautogui 的安全停止异常也必须恢复界面。
+        except Exception as exc:  # 任何异常（含 F8 急停、前台校验中止）都必须恢复界面。
             self._finish_autofill(f"自动填色未开始或已中断：{exc}。请确认游戏为前台、校准有效后重试。")
 
     def _on_progress(self, progress: tuple[int, int]) -> None:

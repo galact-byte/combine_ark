@@ -119,23 +119,3 @@ class AutoFillRunner:
                 if on_progress:
                     on_progress((completed, total))
         return not cancel_event.is_set()
-
-
-class PyAutoGuiMouse:
-    """延迟导入 pyautogui，确保图纸功能不依赖自动化库。"""
-
-    def __init__(self) -> None:
-        try:
-            import pyautogui
-        except ImportError as exc:
-            raise RuntimeError("未安装 pyautogui；请安装依赖后再使用自动填色。") from exc
-        pyautogui.FAILSAFE = True
-        pyautogui.PAUSE = 0.03
-        self._driver = pyautogui
-
-    def click(self, x: int, y: int) -> None:
-        self._driver.click(x, y)
-
-    def scroll(self, clicks: int, x: int, y: int) -> None:
-        self._driver.moveTo(x, y)
-        self._driver.scroll(clicks)
