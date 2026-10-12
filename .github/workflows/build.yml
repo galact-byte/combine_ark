@@ -27,12 +27,15 @@ jobs:
           python -m pip install -r requirements.txt pyinstaller
 
       - name: 打包 exe
-        run: pyinstaller --onefile --noconsole --name ArkPixelHelper main.py
+        run: pyinstaller --onefile --noconsole --name ArkPixelHelper --add-data "LICENSE;." --add-data "NOTICE;." main.py
 
       - name: 发布到 Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/ArkPixelHelper.exe
+          files: |
+            dist/ArkPixelHelper.exe
+            LICENSE
+            NOTICE
           body: |
             ## 奇象巡展 · 像素拼豆助手 ${{ github.ref_name }}
 
@@ -52,5 +55,9 @@ jobs:
 
             - 游戏调色板固定 40 色，缺少中暗青灰等过渡色，大面积低饱和暗部只能就近取色，属正常物理上限
             - 自动填色前请先完成一次窗口校准，并确认游戏在前台
+
+            ### 许可与商业授权
+
+            个人与公司可免费用于合法内部工作。对外售卖、集成进收费产品或提供以软件功能为直接收费内容的服务，须另行取得书面商业授权；免费分发须保留许可、通知和署名，不得冒充官方。完整条款及第三方例外见随附 `LICENSE`、`NOTICE`。
 
             遇到问题欢迎提 [Issue](https://github.com/galact-byte/combine_ark/issues)。
